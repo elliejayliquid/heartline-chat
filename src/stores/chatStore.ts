@@ -32,6 +32,10 @@ interface ChatState {
   backendConfigured: boolean;
   settingsOpen: boolean;
 
+  // Companion editor
+  companionEditorOpen: boolean;
+  editingCompanion: CompanionProfile | null;
+
   // Initialization
   initialized: boolean;
 
@@ -42,6 +46,12 @@ interface ChatState {
   loadSettings: () => Promise<void>;
   saveSettings: (settings: AppSettings) => Promise<void>;
   setSettingsOpen: (open: boolean) => void;
+
+  // Companion CRUD
+  openCompanionEditor: (companion?: CompanionProfile) => void;
+  closeCompanionEditor: () => void;
+  createCompanion: (profile: CompanionProfile) => Promise<void>;
+  updateCompanion: (profile: CompanionProfile) => Promise<void>;
 }
 
 // Guard against React StrictMode double-mounting
@@ -58,6 +68,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   settings: null,
   backendConfigured: false,
   settingsOpen: false,
+  companionEditorOpen: false,
+  editingCompanion: null,
   initialized: false,
 
   initialize: async () => {
@@ -234,6 +246,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setSettingsOpen: (open: boolean) => set({ settingsOpen: open }),
+
+  // --- Companion CRUD ---
+
+  openCompanionEditor: (companion?: CompanionProfile) => {
+    set({
+      companionEditorOpen: true,
+      editingCompanion: companion ?? null,
+    });
+  },
+
+  closeCompanionEditor: () => {
+    set({ companionEditorOpen: false, editingCompanion: null });
+  },
+
+  createCompanion: async (profile: CompanionProfile) => {
+    try {
+      await api.createCompanion(profile);
+      const companions = await api.getCompanions();
+      set({
+        companions,
+        companionEditorOpen: false,
+        editingCompanion: null,
+        activeCompanionId: profile.id,
+        messages: [], // New companion has no messages yet
+        streamingContent: "",
+        isGenerating: false,
+      });
+    } catch (err) {
+      console.error("Failed to create companion:", err);
+      throw err;
+    }
+  },
+
+  updateCompanion: async (profile: CompanionProfile) => {
+    try {
+      await api.updateCompanion(profile);
+      const companions = await api.getCompanions();
+      set({
+        companions,
+        companionEditorOpen: false,
+        editingCompanion: null,
+      });
+    } catch (err) {
+      console.error("Failed to update companion:", err);
+      throw err;
+    }
+  },
 }));
 
 // --- Helpers ---

@@ -33,6 +33,12 @@ pub struct AppSettings {
     pub api_base_url: String,
     pub api_key: String,
     pub default_model: String,
+    // Generation parameters
+    pub temperature: f64,
+    pub max_tokens: u32,
+    // Context management
+    pub context_window_size: u32,
+    pub context_messages_limit: u32,
 }
 
 impl Database {
@@ -287,6 +293,22 @@ impl Database {
             default_model: self
                 .get_setting("default_model")?
                 .unwrap_or_else(|| "gpt-4o-mini".to_string()),
+            temperature: self
+                .get_setting("temperature")?
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.8),
+            max_tokens: self
+                .get_setting("max_tokens")?
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(1024),
+            context_window_size: self
+                .get_setting("context_window_size")?
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(4096),
+            context_messages_limit: self
+                .get_setting("context_messages_limit")?
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(50),
         })
     }
 
@@ -294,6 +316,10 @@ impl Database {
         self.set_setting("api_base_url", &settings.api_base_url)?;
         self.set_setting("api_key", &settings.api_key)?;
         self.set_setting("default_model", &settings.default_model)?;
+        self.set_setting("temperature", &settings.temperature.to_string())?;
+        self.set_setting("max_tokens", &settings.max_tokens.to_string())?;
+        self.set_setting("context_window_size", &settings.context_window_size.to_string())?;
+        self.set_setting("context_messages_limit", &settings.context_messages_limit.to_string())?;
         Ok(())
     }
 }

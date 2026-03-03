@@ -12,6 +12,10 @@ export function SettingsPanel() {
     api_base_url: "https://api.openai.com/v1",
     api_key: "",
     default_model: "gpt-4o-mini",
+    temperature: 0.8,
+    max_tokens: 1024,
+    context_window_size: 4096,
+    context_messages_limit: 50,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,6 +48,8 @@ export function SettingsPanel() {
     { label: "OpenRouter", url: "https://openrouter.ai/api/v1", model: "meta-llama/llama-3-8b-instruct" },
   ];
 
+  const contextPresets = [2048, 4096, 8192, 16384, 32768, 131072];
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="glass glow-border rounded-xl w-full max-w-lg mx-4 overflow-hidden">
@@ -63,8 +69,10 @@ export function SettingsPanel() {
           </button>
         </div>
 
-        {/* Content */}
-        <div className="p-6 space-y-5">
+        {/* Content - scrollable */}
+        <div className="p-6 space-y-5 overflow-y-auto max-h-[60vh]">
+          {/* ── Connection ── */}
+
           {/* Quick presets */}
           <div>
             <label className="block text-xs text-text-secondary mb-2 uppercase tracking-wider">
@@ -142,6 +150,119 @@ export function SettingsPanel() {
               className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
               placeholder="gpt-4o-mini"
             />
+          </div>
+
+          {/* ── Generation ── */}
+          <div className="border-t border-surface-border pt-5">
+            <label className="block text-xs text-text-secondary mb-3 uppercase tracking-wider">
+              Generation
+            </label>
+
+            {/* Temperature */}
+            <div className="mb-4">
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-xs text-text-secondary uppercase tracking-wider">
+                  Temperature
+                </label>
+                <span className="text-xs text-heartline font-mono">
+                  {form.temperature.toFixed(2)}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.05"
+                value={form.temperature}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, temperature: parseFloat(e.target.value) }))
+                }
+                className="w-full accent-heartline"
+              />
+              <div className="flex justify-between text-[10px] text-text-muted mt-0.5">
+                <span>Precise</span>
+                <span>Creative</span>
+              </div>
+            </div>
+
+            {/* Max Tokens */}
+            <div>
+              <label className="block text-xs text-text-secondary mb-1.5 uppercase tracking-wider">
+                Max Response Tokens
+              </label>
+              <input
+                type="number"
+                min={64}
+                max={16384}
+                step={64}
+                value={form.max_tokens}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, max_tokens: parseInt(e.target.value) || 1024 }))
+                }
+                className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
+              />
+              <p className="text-xs text-text-muted mt-1">
+                Maximum length of each response.
+              </p>
+            </div>
+          </div>
+
+          {/* ── Context ── */}
+          <div className="border-t border-surface-border pt-5">
+            <label className="block text-xs text-text-secondary mb-3 uppercase tracking-wider">
+              Context
+            </label>
+
+            {/* Context Window Size */}
+            <div className="mb-4">
+              <label className="block text-xs text-text-secondary mb-1.5 uppercase tracking-wider">
+                Context Window Size
+              </label>
+              <div className="flex flex-wrap gap-2 mb-2">
+                {contextPresets.map((size) => (
+                  <button
+                    key={size}
+                    onClick={() =>
+                      setForm((f) => ({ ...f, context_window_size: size }))
+                    }
+                    className={`px-2.5 py-1 rounded-lg text-xs transition-all ${
+                      form.context_window_size === size
+                        ? "bg-heartline/20 text-heartline border border-heartline/50"
+                        : "glass glass-hover text-text-secondary"
+                    }`}
+                  >
+                    {size >= 1024 ? `${size / 1024}k` : size}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-text-muted">
+                Match to your model's actual context window. Older messages are trimmed to fit.
+              </p>
+            </div>
+
+            {/* Messages History Limit */}
+            <div>
+              <label className="block text-xs text-text-secondary mb-1.5 uppercase tracking-wider">
+                Messages History Limit
+              </label>
+              <input
+                type="number"
+                min={10}
+                max={500}
+                step={10}
+                value={form.context_messages_limit}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    context_messages_limit: parseInt(e.target.value) || 50,
+                  }))
+                }
+                className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
+              />
+              <p className="text-xs text-text-muted mt-1">
+                Max messages loaded from DB before token trimming.
+              </p>
+            </div>
           </div>
 
           {/* Error */}

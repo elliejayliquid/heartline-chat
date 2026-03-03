@@ -6,6 +6,10 @@ import { useChatStore } from "@/stores/chatStore";
  */
 export function AvatarViewport() {
   const isGenerating = useChatStore((s) => s.isGenerating);
+  const companions = useChatStore((s) => s.companions);
+  const activeCompanionId = useChatStore((s) => s.activeCompanionId);
+
+  const activeCompanion = companions.find((c) => c.id === activeCompanionId);
 
   return (
     <div className="h-full flex flex-col items-center justify-center relative overflow-hidden">
@@ -65,9 +69,9 @@ export function AvatarViewport() {
 
       {/* Companion name */}
       <p className="mt-2 font-display text-lg font-semibold text-heartline glow-text">
-        Nova
+        {activeCompanion?.name ?? "Companion"}
       </p>
-      <p className="text-xs text-text-muted">Online</p>
+      <p className="text-xs text-text-muted">{activeCompanion?.status ?? "Offline"}</p>
     </div>
   );
 }

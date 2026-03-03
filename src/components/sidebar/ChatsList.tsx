@@ -5,6 +5,7 @@ export function ChatsList() {
   const activeId = useChatStore((s) => s.activeCompanionId);
   const switchCompanion = useChatStore((s) => s.switchCompanion);
   const messages = useChatStore((s) => s.messages);
+  const openCompanionEditor = useChatStore((s) => s.openCompanionEditor);
 
   // Get last message for the active companion (we only have messages for the active one loaded)
   const getPreview = (companionId: string) => {
@@ -27,7 +28,7 @@ export function ChatsList() {
             <button
               key={companion.id}
               onClick={() => switchCompanion(companion.id)}
-              className={`w-full flex items-center gap-3 p-3 rounded-lg transition-all duration-200 text-left ${
+              className={`group w-full flex items-center gap-3 p-3 rounded-lg transition-all duration-200 text-left ${
                 activeId === companion.id
                   ? "glass glow-border-subtle bg-heartline-soft"
                   : "hover:bg-surface-hover"
@@ -74,9 +75,53 @@ export function ChatsList() {
                   {preview.text}
                 </p>
               </div>
+
+              {/* Edit button (visible on hover) */}
+              <div
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openCompanionEditor(companion);
+                }}
+                className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-surface-hover text-text-muted hover:text-heartline transition-all cursor-pointer"
+                title="Edit companion"
+              >
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                </svg>
+              </div>
             </button>
           );
         })}
+      </div>
+
+      {/* New Companion button */}
+      <div className="p-2 border-t border-surface-border">
+        <button
+          onClick={() => openCompanionEditor()}
+          className="w-full flex items-center justify-center gap-2 p-2.5 rounded-lg glass glass-hover text-text-secondary hover:text-heartline transition-all"
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          >
+            <line x1="7" y1="1" x2="7" y2="13" />
+            <line x1="1" y1="7" x2="13" y2="7" />
+          </svg>
+          <span className="text-xs">New Companion</span>
+        </button>
       </div>
     </div>
   );

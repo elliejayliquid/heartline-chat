@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { TitleBar } from "./components/layout/TitleBar";
 import { PanelLayout } from "./components/layout/PanelLayout";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
+import { CompanionEditor } from "./components/companions/CompanionEditor";
 import { useChatStore } from "./stores/chatStore";
 
 export default function App() {
@@ -39,8 +40,9 @@ export default function App() {
         </div>
       )}
 
-      {/* Settings modal (overlays everything) */}
+      {/* Modals (overlay everything) */}
       <SettingsPanel />
+      <CompanionEditor />
     </div>
   );
 }

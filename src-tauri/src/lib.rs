@@ -137,8 +137,13 @@ async fn send_message(
         .get_companion(&companion_id)?
         .ok_or_else(|| "Companion not found".to_string())?;
 
-    // 3. Build message history for context
-    let history = state.db.get_messages(&companion_id, 50, 0)?;
+    // 3. Load settings for generation parameters
+    let settings = state.db.get_settings()?;
+
+    // 4. Build message history for context
+    let history = state
+        .db
+        .get_messages(&companion_id, settings.context_messages_limit, 0)?;
 
     let mut messages = Vec::new();
 
@@ -156,14 +161,43 @@ async fn send_message(
         });
     }
 
-    // 4. Generate streaming response
+    // 5. Token-aware context trimming (rough estimate: 1 token ≈ 4 chars)
+    let estimate_tokens = |s: &str| -> u32 { (s.len() as u32) / 4 };
+
+    let system_tokens = estimate_tokens(&companion.personality);
+    let available = settings
+        .context_window_size
+        .saturating_sub(settings.max_tokens)
+        .saturating_sub(system_tokens);
+
+    // Walk backward from newest, keeping as many messages as fit
+    let mut total: u32 = 0;
+    let mut keep_from = messages.len();
+    for i in (1..messages.len()).rev() {
+        let msg_tokens = estimate_tokens(&messages[i].content);
+        if total + msg_tokens > available {
+            break;
+        }
+        total += msg_tokens;
+        keep_from = i;
+    }
+
+    // Trim: keep system prompt (index 0) + messages that fit
+    if keep_from > 1 {
+        let system = messages[0].clone();
+        messages = std::iter::once(system)
+            .chain(messages[keep_from..].iter().cloned())
+            .collect();
+    }
+
+    // 6. Generate streaming response
     let (tx, mut rx) = mpsc::channel::<StreamChunk>(128);
 
     let request = GenerateRequest {
         messages,
         model: None, // Use default from backend config
-        temperature: Some(0.8),
-        max_tokens: Some(1024),
+        temperature: Some(settings.temperature),
+        max_tokens: Some(settings.max_tokens),
         stream: true,
     };
 

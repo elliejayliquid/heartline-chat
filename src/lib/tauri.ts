@@ -7,6 +7,12 @@ export interface AppSettings {
   api_base_url: string;
   api_key: string;
   default_model: string;
+  // Generation parameters
+  temperature: number;
+  max_tokens: number;
+  // Context management
+  context_window_size: number;
+  context_messages_limit: number;
 }
 
 export interface CompanionProfile {
