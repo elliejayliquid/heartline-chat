@@ -7,6 +7,7 @@ import {
   type StoredMessage,
   type AppSettings,
 } from "@/lib/tauri";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 
 export interface Message {
   id: string;
@@ -20,7 +21,7 @@ interface ChatState {
   // Current conversation
   messages: Message[];
   isGenerating: boolean;
-  streamingContent: string; // Content being streamed in real-time
+  streamingContent: string;
 
   // Companions
   companions: CompanionProfile[];
@@ -35,13 +36,18 @@ interface ChatState {
   initialized: boolean;
 
   // Actions
-  initialize: () => Promise<void>;
+  initialize: () => Promise<() => void>;
   sendMessage: (content: string) => Promise<void>;
   switchCompanion: (id: string) => Promise<void>;
   loadSettings: () => Promise<void>;
   saveSettings: (settings: AppSettings) => Promise<void>;
   setSettingsOpen: (open: boolean) => void;
 }
+
+// Guard against React StrictMode double-mounting
+let listenersSetUp = false;
+let unlistenChunk: UnlistenFn | null = null;
+let unlistenError: UnlistenFn | null = null;
 
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
@@ -55,7 +61,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   initialized: false,
 
   initialize: async () => {
-    if (get().initialized) return;
+    if (get().initialized) return () => {};
 
     try {
       // Load companions from database
@@ -82,62 +88,70 @@ export const useChatStore = create<ChatState>((set, get) => ({
         backendConfigured,
         settings,
         initialized: true,
-        // Auto-open settings if no API key configured
         settingsOpen: !backendConfigured,
       });
 
-      // Set up streaming listener
-      onStreamChunk((chunk) => {
-        if (chunk.done) {
-          // Streaming complete - finalize the assistant message
-          const content = get().streamingContent;
-          if (content) {
-            set((state) => ({
-              messages: [
-                ...state.messages,
-                {
-                  id: crypto.randomUUID(),
-                  role: "assistant" as const,
-                  content,
-                  timestamp: new Date(),
-                },
-              ],
-              streamingContent: "",
-              isGenerating: false,
-            }));
+      // Set up streaming listeners ONCE (module-level guard against StrictMode)
+      if (!listenersSetUp) {
+        listenersSetUp = true;
 
-            // Update companion's last message in the list
-            updateCompanionPreview(get, set);
+        unlistenChunk?.();
+        unlistenError?.();
+
+        unlistenChunk = await onStreamChunk((chunk) => {
+          if (chunk.done) {
+            const content = get().streamingContent;
+            if (content) {
+              set((state) => ({
+                messages: [
+                  ...state.messages,
+                  {
+                    id: crypto.randomUUID(),
+                    role: "assistant" as const,
+                    content,
+                    timestamp: new Date(),
+                  },
+                ],
+                streamingContent: "",
+                isGenerating: false,
+              }));
+            } else {
+              set({ isGenerating: false });
+            }
           } else {
-            set({ isGenerating: false });
+            set((state) => ({
+              streamingContent: state.streamingContent + chunk.delta,
+            }));
           }
-        } else {
-          // Append streaming token
-          set((state) => ({
-            streamingContent: state.streamingContent + chunk.delta,
-          }));
-        }
-      });
+        });
 
-      onStreamError((error) => {
-        console.error("Stream error:", error);
-        set((state) => ({
-          isGenerating: false,
-          streamingContent: "",
-          messages: [
-            ...state.messages,
-            {
-              id: crypto.randomUUID(),
-              role: "assistant" as const,
-              content: `*Connection error: ${error}*`,
-              timestamp: new Date(),
-            },
-          ],
-        }));
-      });
+        unlistenError = await onStreamError((error) => {
+          console.error("Stream error:", error);
+          set((state) => ({
+            isGenerating: false,
+            streamingContent: "",
+            messages: [
+              ...state.messages,
+              {
+                id: crypto.randomUUID(),
+                role: "assistant" as const,
+                content: `*Connection error: ${error}*`,
+                timestamp: new Date(),
+              },
+            ],
+          }));
+        });
+      }
     } catch (err) {
       console.error("Failed to initialize:", err);
     }
+
+    // Return cleanup function
+    return () => {
+      unlistenChunk?.();
+      unlistenError?.();
+      listenersSetUp = false;
+    };
   },
 
   sendMessage: async (content: string) => {
@@ -149,7 +163,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    // Add user message to UI immediately
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: "user",
@@ -164,7 +177,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
 
     try {
-      // Send to backend - streaming will come via events
       await api.sendMessage(activeCompanionId, content);
     } catch (err) {
       console.error("Failed to send message:", err);
@@ -234,18 +246,4 @@ function storedToMessage(msg: StoredMessage): Message {
     timestamp: new Date(msg.timestamp + "Z"),
     emotion: msg.emotion ?? undefined,
   };
-}
-
-function updateCompanionPreview(
-  get: () => ChatState,
-  set: (partial: Partial<ChatState>) => void
-) {
-  const { activeCompanionId, companions, messages } = get();
-  if (!activeCompanionId) return;
-
-  const lastMsg = messages[messages.length - 1];
-  if (!lastMsg) return;
-
-  // We don't modify the CompanionProfile from DB here,
-  // but the UI can derive the preview from store state
 }

@@ -39,8 +39,8 @@ export function SettingsPanel() {
 
   const presets = [
     { label: "OpenAI", url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-    { label: "Ollama (local)", url: "http://localhost:11434/v1", model: "llama3.2" },
-    { label: "LM Studio", url: "http://localhost:1234/v1", model: "local-model" },
+    { label: "Ollama (local)", url: "http://127.0.0.1:11434/v1", model: "llama3.2" },
+    { label: "LM Studio", url: "http://127.0.0.1:1234/v1", model: "local-model" },
     { label: "OpenRouter", url: "https://openrouter.ai/api/v1", model: "meta-llama/llama-3-8b-instruct" },
   ];
 

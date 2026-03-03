@@ -37,7 +37,8 @@ async fn save_settings(
     state.db.save_settings(&settings)?;
 
     // Reconfigure inference backend with new settings
-    if !settings.api_key.is_empty() {
+    // Note: API key can be empty for local servers (Ollama, LM Studio)
+    if !settings.api_base_url.is_empty() {
         let config = ApiBackendConfig {
             base_url: settings.api_base_url.clone(),
             api_key: settings.api_key.clone(),
@@ -147,19 +148,13 @@ async fn send_message(
         content: companion.personality.clone(),
     });
 
-    // Recent history
+    // Recent history (already includes the user message we just saved)
     for msg in &history {
         messages.push(ChatMessage {
             role: msg.role.clone(),
             content: msg.content.clone(),
         });
     }
-
-    // Current user message
-    messages.push(ChatMessage {
-        role: "user".to_string(),
-        content: user_message,
-    });
 
     // 4. Generate streaming response
     let (tx, mut rx) = mpsc::channel::<StreamChunk>(128);
@@ -263,7 +258,7 @@ pub fn run() {
             let state_clone = state.clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(settings) = state_clone.db.get_settings() {
-                    if !settings.api_key.is_empty() {
+                    if !settings.api_base_url.is_empty() {
                         let config = ApiBackendConfig {
                             base_url: settings.api_base_url,
                             api_key: settings.api_key,

@@ -73,7 +73,7 @@ export function ChatWindow() {
         {isGenerating && streamingContent && (
           <div className="flex justify-start">
             <div className="max-w-[80%] rounded-2xl rounded-bl-md px-4 py-2.5 text-sm leading-relaxed glass border-heartline/10">
-              <p className="whitespace-pre-wrap">{streamingContent}</p>
+              <p className="whitespace-pre-wrap break-words overflow-hidden">{streamingContent}</p>
               <span className="inline-block w-2 h-4 bg-heartline/60 animate-pulse ml-0.5" />
             </div>
           </div>
@@ -161,7 +161,7 @@ function MessageBubble({ message }: { message: Message }) {
             : "glass border-heartline/10 text-text-primary rounded-bl-md"
         }`}
       >
-        <p className="whitespace-pre-wrap">{message.content}</p>
+        <p className="whitespace-pre-wrap break-words overflow-hidden">{message.content}</p>
         <p className={`text-[10px] mt-1 ${isUser ? "text-heartline-dim" : "text-text-muted"}`}>
           {formatTimestamp(message.timestamp)}
         </p>

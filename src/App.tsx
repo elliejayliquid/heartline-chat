@@ -9,7 +9,15 @@ export default function App() {
   const initialized = useChatStore((s) => s.initialized);
 
   useEffect(() => {
-    initialize();
+    let cleanup: (() => void) | undefined;
+
+    initialize().then((cleanupFn) => {
+      cleanup = cleanupFn;
+    });
+
+    return () => {
+      cleanup?.();
+    };
   }, [initialize]);
 
   return (
