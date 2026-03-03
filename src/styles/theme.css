@@ -1,0 +1,199 @@
+@import "tailwindcss";
+
+/* ============================================
+   HEARTLINE - Cosmic Theme
+   Deep space aesthetic with cyan/teal accents
+   ============================================ */
+
+@theme {
+  /* Core cosmic palette */
+  --color-space-900: #040810;
+  --color-space-800: #0a1220;
+  --color-space-700: #0d1a30;
+  --color-space-600: #112240;
+  --color-space-500: #1a3050;
+
+  /* Accent colors */
+  --color-heartline: #00e5ff;
+  --color-heartline-dim: #00a5b8;
+  --color-heartline-glow: #00e5ff40;
+  --color-heartline-soft: #00e5ff15;
+  --color-accent-warm: #ff6b9d;
+  --color-accent-purple: #a855f7;
+
+  /* Text */
+  --color-text-primary: #e8f0ff;
+  --color-text-secondary: #8899b8;
+  --color-text-muted: #556680;
+
+  /* Surface (frosted glass panels) */
+  --color-surface: #0d1a3080;
+  --color-surface-hover: #112240a0;
+  --color-surface-border: #00e5ff20;
+  --color-surface-border-active: #00e5ff50;
+
+  /* Fonts */
+  --font-display: "Exo 2", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+/* ============================================
+   Base styles
+   ============================================ */
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: var(--color-space-900);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+}
+
+/* Custom scrollbar - cosmic themed */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-heartline-dim);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-heartline);
+}
+
+/* ============================================
+   Frosted glass effect
+   ============================================ */
+
+.glass {
+  background: var(--color-surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-surface-border);
+}
+
+.glass-hover:hover {
+  background: var(--color-surface-hover);
+  border-color: var(--color-surface-border-active);
+}
+
+/* ============================================
+   Glow effects
+   ============================================ */
+
+.glow-text {
+  text-shadow: 0 0 10px var(--color-heartline-glow),
+               0 0 20px var(--color-heartline-glow);
+}
+
+.glow-border {
+  box-shadow: 0 0 8px var(--color-heartline-glow),
+              inset 0 0 8px var(--color-heartline-glow);
+}
+
+.glow-border-subtle {
+  box-shadow: 0 0 4px var(--color-heartline-glow);
+}
+
+/* ============================================
+   Heartline pulse animation
+   ============================================ */
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+@keyframes heartline-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* ============================================
+   Starfield background (CSS-only base layer)
+   ============================================ */
+
+.starfield {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.starfield::before,
+.starfield::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,0.6), transparent),
+    radial-gradient(1px 1px at 30% 70%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(1.5px 1.5px at 50% 40%, rgba(255,255,255,0.7), transparent),
+    radial-gradient(1px 1px at 70% 10%, rgba(255,255,255,0.5), transparent),
+    radial-gradient(1px 1px at 80% 80%, rgba(255,255,255,0.3), transparent),
+    radial-gradient(1.5px 1.5px at 90% 50%, rgba(255,255,255,0.6), transparent),
+    radial-gradient(1px 1px at 15% 90%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(1px 1px at 45% 15%, rgba(255,255,255,0.5), transparent),
+    radial-gradient(1.5px 1.5px at 65% 55%, rgba(255,255,255,0.3), transparent),
+    radial-gradient(1px 1px at 25% 45%, rgba(255,255,255,0.6), transparent);
+}
+
+.starfield::after {
+  background-image:
+    radial-gradient(1px 1px at 5% 50%, rgba(0,229,255,0.3), transparent),
+    radial-gradient(1px 1px at 35% 25%, rgba(0,229,255,0.2), transparent),
+    radial-gradient(1px 1px at 55% 85%, rgba(168,85,247,0.2), transparent),
+    radial-gradient(1px 1px at 75% 35%, rgba(0,229,255,0.3), transparent),
+    radial-gradient(1.5px 1.5px at 95% 65%, rgba(168,85,247,0.15), transparent),
+    radial-gradient(1px 1px at 20% 75%, rgba(0,229,255,0.2), transparent);
+  animation: pulse-glow 4s ease-in-out infinite;
+}
+
+/* ============================================
+   Allotment (split pane) overrides
+   ============================================ */
+
+.split-view-view {
+  overflow: hidden !important;
+}
+
+.sash-container .sash {
+  background: var(--color-surface-border) !important;
+  transition: background 0.2s;
+}
+
+.sash-container .sash:hover,
+.sash-container .sash.active {
+  background: var(--color-heartline) !important;
+}
+
+/* ============================================
+   Custom title bar (frameless window)
+   ============================================ */
+
+.titlebar {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+
+.titlebar-nodrag {
+  -webkit-app-region: no-drag;
+}
