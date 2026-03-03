@@ -14,7 +14,6 @@ export function CompanionEditor() {
   const [form, setForm] = useState({
     name: "",
     personality: "",
-    status: "Online",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,10 +24,9 @@ export function CompanionEditor() {
       setForm({
         name: editingCompanion.name,
         personality: editingCompanion.personality,
-        status: editingCompanion.status,
       });
     } else if (isOpen) {
-      setForm({ name: "", personality: "", status: "Online" });
+      setForm({ name: "", personality: "" });
     }
     setError(null);
   }, [isOpen, editingCompanion]);
@@ -49,7 +47,7 @@ export function CompanionEditor() {
         id: editingCompanion?.id ?? crypto.randomUUID(),
         name: form.name.trim(),
         personality: form.personality,
-        status: form.status || "Online",
+        status: editingCompanion?.status ?? "Online",
         avatar_url: editingCompanion?.avatar_url ?? null,
         created_at: editingCompanion?.created_at ?? new Date().toISOString(),
       };
@@ -99,20 +97,6 @@ export function CompanionEditor() {
               className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
               placeholder="e.g. Luna, Kai, Atlas..."
               autoFocus
-            />
-          </div>
-
-          {/* Status */}
-          <div>
-            <label className="block text-xs text-text-secondary mb-1.5 uppercase tracking-wider">
-              Status
-            </label>
-            <input
-              type="text"
-              value={form.status}
-              onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}
-              className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
-              placeholder="Online"
             />
           </div>
 
