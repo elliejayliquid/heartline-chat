@@ -140,9 +140,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         unlistenError = await onStreamError((error) => {
           console.error("Stream error:", error);
+          // Mark as disconnected so auto-reconnect kicks in
           set((state) => ({
             isGenerating: false,
             streamingContent: "",
+            backendConfigured: false,
             messages: [
               ...state.messages,
               {
@@ -213,8 +215,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.sendMessage(activeCompanionId, content);
     } catch (err) {
       console.error("Failed to send message:", err);
+      // Mark as disconnected so auto-reconnect kicks in
       set((state) => ({
         isGenerating: false,
+        backendConfigured: false,
         messages: [
           ...state.messages,
           {
