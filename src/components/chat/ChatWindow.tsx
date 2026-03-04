@@ -14,6 +14,7 @@ export function ChatWindow() {
 
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const activeCompanion = companions.find((c) => c.id === activeCompanionId);
 
@@ -21,6 +22,18 @@ export function ChatWindow() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streamingContent]);
+
+  // Auto-resize textarea as content changes
+  const resizeTextarea = () => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, 150) + "px";
+  };
+
+  useEffect(() => {
+    resizeTextarea();
+  }, [input]);
 
   const handleSend = () => {
     const text = input.trim();
@@ -114,6 +127,7 @@ export function ChatWindow() {
           {/* Text input */}
           <div className="flex-1 relative">
             <textarea
+              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -124,8 +138,7 @@ export function ChatWindow() {
               }
               rows={1}
               disabled={!backendConfigured}
-              className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted resize-none focus:outline-none focus:border-heartline/50 focus:glow-border-subtle transition-all disabled:opacity-50"
-              style={{ maxHeight: "120px" }}
+              className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted resize-none overflow-y-auto focus:outline-none focus:border-heartline/50 focus:glow-border-subtle transition-all disabled:opacity-50"
             />
           </div>
 
