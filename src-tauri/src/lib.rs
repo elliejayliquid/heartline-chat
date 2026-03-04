@@ -254,7 +254,26 @@ async fn send_message(
 async fn check_backend_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<bool, String> {
-    Ok(state.inference.is_configured().await)
+    // If already configured, just confirm
+    if state.inference.is_configured().await {
+        return Ok(true);
+    }
+
+    // Not configured — try to connect from saved settings (auto-reconnect)
+    if let Ok(settings) = state.db.get_settings() {
+        if !settings.api_base_url.is_empty() {
+            let config = ApiBackendConfig {
+                base_url: settings.api_base_url,
+                api_key: settings.api_key,
+                default_model: settings.default_model,
+            };
+            if state.inference.configure_api_backend(config).await.is_ok() {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 // ============================================================

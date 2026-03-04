@@ -58,6 +58,7 @@ interface ChatState {
 let listenersSetUp = false;
 let unlistenChunk: UnlistenFn | null = null;
 let unlistenError: UnlistenFn | null = null;
+let reconnectInterval: ReturnType<typeof setInterval> | null = null;
 
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
@@ -154,6 +155,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }));
         });
       }
+
+      // Auto-reconnect: poll every 5s when backend isn't connected
+      if (reconnectInterval) clearInterval(reconnectInterval);
+      reconnectInterval = setInterval(async () => {
+        const { backendConfigured } = get();
+        if (backendConfigured) return; // Already connected, skip
+
+        try {
+          const connected = await api.checkBackendStatus();
+          if (connected) {
+            set({ backendConfigured: true });
+          }
+        } catch {
+          // Silently ignore — will retry next interval
+        }
+      }, 5000);
     } catch (err) {
       console.error("Failed to initialize:", err);
     }
@@ -163,6 +180,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       unlistenChunk?.();
       unlistenError?.();
       listenersSetUp = false;
+      if (reconnectInterval) {
+        clearInterval(reconnectInterval);
+        reconnectInterval = null;
+      }
     };
   },
 
