@@ -307,6 +307,20 @@ pub fn run() {
                 events,
             });
 
+            // Auto-start Ollama if settings point to it
+            if let Ok(settings) = state.db.get_settings() {
+                if settings.api_base_url.contains("127.0.0.1:11434")
+                    || settings.api_base_url.contains("localhost:11434")
+                {
+                    // Spawn "ollama serve" in background — harmlessly fails if already running
+                    let _ = std::process::Command::new("ollama")
+                        .arg("serve")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+            }
+
             // Try to configure backend from saved settings
             let state_clone = state.clone();
             tauri::async_runtime::spawn(async move {
