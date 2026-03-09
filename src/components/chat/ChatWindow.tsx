@@ -80,7 +80,7 @@ export function ChatWindow() {
         </div>
         <button
           onClick={() => createConversation()}
-          className="shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs text-text-muted hover:text-heartline hover:bg-surface-hover transition-all"
+          className="shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs text-text-muted hover:text-heartline hover:bg-surface-hover transition-all focus:outline-none"
           title="Start a new chat"
         >
           <svg

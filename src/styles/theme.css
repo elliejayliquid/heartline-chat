@@ -56,6 +56,12 @@ html, body, #root {
   font-family: var(--font-body);
 }
 
+/* Remove default focus outlines — we use our own glow effects */
+button:focus,
+[role="button"]:focus {
+  outline: none;
+}
+
 /* Custom scrollbar - cosmic themed */
 ::-webkit-scrollbar {
   width: 6px;
