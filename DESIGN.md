@@ -141,13 +141,47 @@ InferenceManager
 
 ### 4.2 Memory System
 
-Three tiers of memory, all stored locally:
+Five layers of memory, all stored locally. Each layer has different rules for storage, retrieval, and lifecycle.
 
-| Tier | Purpose | Storage | Retrieval |
-|------|---------|---------|-----------|
-| **Chat History** | Full conversation logs | SQLite (structured) | Scrollback, search |
-| **Working Memory** | Recent context, current conversation summary | In-memory | Auto-injected into prompt |
-| **Long-term Memory** | Important facts, user preferences, relationship notes | SQLite + vector embeddings | Semantic search, auto-recall |
+| Layer | Purpose | Storage | Retrieval |
+|-------|---------|---------|-----------|
+| **Chat History** | Full conversation logs per thread | SQLite (structured) | Scrollback, search |
+| **Working Memory** | Recent context + pinned memories | In-memory | Auto-injected into prompt every turn |
+| **Episodic Memory** | Significant events and shared history | SQLite + vector embeddings | Semantic search, auto-recall |
+| **Semantic Memory** | Extracted patterns, preferences, facts | SQLite + vector embeddings | Purpose-based retrieval |
+| **Identity Profile** | Companion's stable behavioral traits | SQLite | Loaded at session boot |
+
+#### Memory Entry Types
+
+Every memory declares what it is, enabling smarter retrieval:
+
+- `episode` — a meaningful event or conversation moment
+- `semantic_fact` — extracted pattern or preference (evidence-based, revisable)
+- `journal_reflection` — companion's private self-narration (observation, hypothesis, self-state, intention)
+- `preference` — user preference confirmed across multiple interactions
+- `relationship_shift` — change in relationship dynamic or trust level
+- `identity_note` — companion behavioral trait (stable, low-rotation)
+
+#### Memory Entry Fields
+
+```yaml
+text: "User prefers directness over reassurance"
+type: semantic_fact
+confidence: 0.84          # How sure (0-1)
+stability: high            # high / medium / tentative
+last_confirmed: "2026-03-09"
+why_it_mattered: "Consistent across 5+ conversations"
+tags: ["interaction-style", "preference"]
+source_refs: ["conv-abc123"]  # Link back to episodes
+supersedes: null              # ID of memory this replaces
+```
+
+#### Key Design Principles
+
+- **Confidence-weighted**: Every interpretation has confidence, stability, and last_confirmed. Tentative memories are treated differently from solid ones.
+- **Revision over accumulation**: Memories can be merged, superseded, weakened, archived, or retired. New evidence should refine existing memories, not create duplicates.
+- **Retrieval by function**: Don't just retrieve by semantic similarity. Retrieve separately for: user preferences, emotional continuity, unresolved threads, identity consistency, callback opportunities. The most semantically similar memory is not always the most socially useful.
+- **The main model should NEVER know about memory management.** Memory extraction, summarization, and retrieval happen in background sidecar processes. The response model just sees the assembled context.
 
 **How it works:**
 
@@ -155,6 +189,28 @@ Three tiers of memory, all stored locally:
 2. Facts are stored with vector embeddings for semantic retrieval
 3. When building a prompt, relevant memories are retrieved and injected into context
 4. Users can view, edit, and delete memories (full transparency)
+5. Old memories decay in retrieval priority; stale conclusions can be retired
+
+#### Failure Modes to Avoid
+
+| Failure Mode | Cause | Prevention |
+|-------------|-------|------------|
+| **Clinginess** | Over-weighting emotional memories, too much initiative | Initiative thresholds, memory decay, uncertainty in relational inference |
+| **Repetition** | Same pinned memories forever, same retrieved notes | Retrieval diversity penalties, cooldowns on recalled memories, anti-loop checks |
+| **False intimacy** | Elevating weak evidence into emotional certainty | Evidence-linked memory, explicit uncertainty, separate observation from inference |
+| **Personality collapse** | No identity layer, fragmented memory, model changes | Stable behavioral profile, pinned identity notes, model-agnostic personality schema |
+| **Haunted scrapbook** | Too many sentimental artifacts with no curation | Stronger curation thresholds, archive tiers, "why does this matter now?" gating |
+
+#### Anti-Loop Protections
+
+Critical for companion systems where loops manifest as repeated reassurance, repeated concern, repeated intimacy moves, or repeated callbacks to old emotional moments.
+
+- **Cooldowns**: If a memory was just retrieved, reduce its retrieval score temporarily
+- **Diversity sampling**: Don't let the same 2-3 memories dominate context repeatedly
+- **"What changed?" gate**: Before resurfacing a topic, verify something is actually new
+- **Track unresolved threads explicitly**: Store topic + status + last_mentioned + mention_count + next_valid_checkin so the model doesn't anxiously resurface things
+- **Cap self-reinforcing identity notes**: Identity notes require repeated evidence, start low-confidence, have expiry/review, and aren't overexposed in context
+- **Boredom heuristic**: Track repeated topic/action/phrasing and add a "this is stale" penalty
 
 ### 4.3 Context Builder
 
@@ -162,15 +218,23 @@ Assembles the final prompt sent to the model:
 
 ```
 [System prompt / companion personality]
-[Relevant long-term memories (retrieved by semantic similarity)]
-[Conversation summary (if history is long)]
-[Recent message history (last N messages)]
+[Identity profile (stable behavioral traits)]           # Future
+[Relevant long-term memories (retrieved by function)]    # Future
+[Conversation summary (if history is long)]              # Future
+[Recent message history (last N messages, token-trimmed)]
 [Current user message]
 ```
 
-- Automatically manages context window size based on model's limit
-- Smart truncation: summarize old messages rather than dropping them
-- User-configurable: how much memory to inject, context size, etc.
+**Currently implemented:**
+- Token-aware context trimming (rough estimate: 1 token ≈ 4 chars)
+- Configurable context window size (2K–128K presets) and messages limit
+- Automatic oldest-message trimming to fit within `context_window - max_tokens - system_prompt`
+- Messages scoped to active conversation (not companion-wide)
+
+**Future:**
+- Summarize old messages rather than dropping them (rolling summaries)
+- Inject relevant memories from semantic search
+- Purpose-based memory retrieval (preferences, emotional continuity, identity)
 
 ### 4.4 Multi-Model Pipeline
 
@@ -204,6 +268,7 @@ response       classification extraction
 | **Summarizer** | Small (1B-3B) | Compress old conversation history into summaries | Background, periodic |
 
 **Why this is powerful:**
+
 - The response model stays focused on being a good conversationalist
 - Sidecar models run in parallel, don't slow down the main response
 - Emotion analysis happens *during* streaming, so avatar reacts in real-time
@@ -264,6 +329,7 @@ This is one of the sidecar model roles (see Multi-Model Pipeline above), but can
 | **TTS** (Text-to-Speech) | Piper, Qwen3-TTS, Coqui XTTS | ElevenLabs, OpenAI TTS |
 
 **Qwen3-TTS (primary local TTS candidate):**
+
 - Two sizes: [0.6B (efficient)](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice) and [1.7B (peak quality)](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice)
 - **Emotion/instruction control:** Tell it *how* to speak via natural language (e.g. "speak warmly", "excited tone") - pairs perfectly with our emotion analyzer
 - **97ms streaming latency** - real-time conversational speed
@@ -391,6 +457,7 @@ Level 5: Deep Bond    -> Full emotional range, unique animations unlocked, proac
 A community marketplace where users can share and sell companion profiles:
 
 **What's in a companion package:**
+
 - Personality prompt + system instructions
 - Custom 3D avatar (glTF/VRM model + animations)
 - Voice configuration (TTS model, voice clone sample, speaking style)
@@ -398,6 +465,7 @@ A community marketplace where users can share and sell companion profiles:
 - Theme/color palette
 
 **Marketplace model:**
+
 - **Free tier:** Share companions openly, community ratings
 - **Premium companions:** Creators can sell polished companions (revenue share)
 - **Subscription option:** Access to a curated library of premium companions
@@ -616,16 +684,21 @@ The scheduler runs as a background task in the Rust backend. When it decides to 
 - [x] Panel layout system (draggable, resizable)
 - [x] Basic chat UI (message bubbles, input bar)
 
-### Phase 1 - Chat Core (Current Target)
+### Phase 1 - Chat Core ✅
 
-- [ ] Inference manager with **trait-based architecture** (plugin-ready from day one)
-- [ ] API backend (OpenAI-compatible) as first trait implementation
-- [ ] Streaming message display (tokens appear in real-time)
-- [ ] Chat history persistence (SQLite)
-- [ ] Multiple conversation support (chat switching works)
-- [ ] Companion profile system (personality prompts)
-- [ ] Settings panel (API keys, model selection)
-- [ ] Event bus foundation (for plugin hooks and scheduler triggers later)
+- [x] Inference manager with **trait-based architecture** (plugin-ready from day one)
+- [x] API backend (OpenAI-compatible) as first trait implementation
+- [x] Streaming message display (tokens appear in real-time)
+- [x] Chat history persistence (SQLite)
+- [x] Multiple conversation support (per-companion threads with create/delete/rename)
+- [x] Companion profile system (personality prompts, create/edit UI)
+- [x] Settings panel (API keys, model selection, temperature, max tokens, context window)
+- [x] Event bus foundation (for plugin hooks and scheduler triggers later)
+- [x] Auto-reconnect to Ollama (5s polling when disconnected)
+- [x] Auto-start Ollama on launch (if configured)
+- [x] Token-aware context trimming (estimate tokens, trim oldest messages to fit window)
+- [x] Auto-growing chat input field
+- [x] Auto-title conversations from first message
 
 ### Phase 2 - Local Models
 
@@ -637,11 +710,16 @@ The scheduler runs as a background task in the Rust backend. When it decides to 
 
 ### Phase 3 - Memory
 
-- [ ] Chat summarization (background task)
-- [ ] Long-term memory extraction and storage
-- [ ] Vector embedding + semantic retrieval
-- [ ] Context builder with memory injection
-- [ ] Memory viewer/editor in UI
+- [ ] Rolling summaries (triggered every N messages, stored per conversation)
+- [ ] Memory extraction pipeline (facts, preferences, relationship shifts via sidecar model)
+- [ ] Memory entry types with confidence, stability, and revision support
+- [ ] Vector embedding + semantic retrieval (SQLite vector extension or qdrant-embedded)
+- [ ] Purpose-based context retrieval (preferences, emotional continuity, identity, callbacks)
+- [ ] Anti-loop protections (retrieval cooldowns, diversity sampling, staleness penalties)
+- [ ] Companion identity profile (stable behavioral traits, model-agnostic)
+- [ ] Private companion journal (observation, hypothesis, self-state, intention categories)
+- [ ] Session boot sequence (vector-search relevant memories on conversation start)
+- [ ] Memory viewer/editor in UI (full user transparency and control)
 
 ### Phase 4 - 3D Avatar
 
@@ -737,6 +815,24 @@ HeartlineChat/
 - **Marketplace infrastructure:** Self-hosted vs. platform (itch.io-style)? Payment processing? Content moderation?
 - **Relationship progression tuning:** How fast should levels progress? Should it be configurable per companion?
 
+## 12. Extra notes
+
+### 12.1
+
+# Instead of loading ALL tools at boot (eating precious context)
+
+- memory tools (500 tokens)
+- journal tools (500 tokens)  
+- emotion tools (300 tokens)
+- animation tools (400 tokens)
+  Total: 1700 tokens just sitting there
+
+# Deferred loading
+
+- Boot: just a tool registry (100 tokens)
+- Model says "search_memory" → load memory tools on demand
+  Only pays the token cost when actually needed
+
 ### Resolved Questions
 
 - ~~Multi-model conversations~~ -> **Yes.** Designed as the Multi-Model Pipeline (Section 4.4). Sidecar models handle emotion, memory, summarization.
@@ -744,4 +840,4 @@ HeartlineChat/
 
 ---
 
-*Last updated: 2026-03-03*
+*Last updated: 2026-03-09*
