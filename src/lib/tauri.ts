@@ -24,9 +24,18 @@ export interface CompanionProfile {
   created_at: string;
 }
 
+export interface Conversation {
+  id: string;
+  companion_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface StoredMessage {
   id: number;
   companion_id: string;
+  conversation_id: string;
   role: string;
   content: string;
   timestamp: string;
@@ -55,19 +64,29 @@ export const api = {
   updateCompanion: (profile: CompanionProfile) =>
     invoke<void>("update_companion", { profile }),
 
+  // Conversations
+  getConversations: (companionId: string) =>
+    invoke<Conversation[]>("get_conversations", { companionId }),
+  createConversation: (id: string, companionId: string, title: string) =>
+    invoke<void>("create_conversation", { id, companionId, title }),
+  renameConversation: (id: string, title: string) =>
+    invoke<void>("rename_conversation", { id, title }),
+  deleteConversation: (id: string) =>
+    invoke<void>("delete_conversation", { id }),
+
   // Messages
-  getMessages: (companionId: string, limit?: number, offset?: number) =>
+  getMessages: (conversationId: string, limit?: number, offset?: number) =>
     invoke<StoredMessage[]>("get_messages", {
-      companionId,
+      conversationId,
       limit: limit ?? null,
       offset: offset ?? null,
     }),
-  saveMessage: (companionId: string, role: string, content: string) =>
-    invoke<number>("save_message", { companionId, role, content }),
+  saveMessage: (companionId: string, conversationId: string, role: string, content: string) =>
+    invoke<number>("save_message", { companionId, conversationId, role, content }),
 
   // Chat
-  sendMessage: (companionId: string, userMessage: string) =>
-    invoke<void>("send_message", { companionId, userMessage }),
+  sendMessage: (companionId: string, conversationId: string, userMessage: string) =>
+    invoke<void>("send_message", { companionId, conversationId, userMessage }),
   checkBackendStatus: () => invoke<boolean>("check_backend_status"),
 };
 

@@ -2,7 +2,7 @@ mod db;
 mod events;
 mod inference;
 
-use db::{AppSettings, CompanionProfile, Database, StoredMessage};
+use db::{AppSettings, CompanionProfile, Conversation, Database, StoredMessage};
 use events::{AppEvent, EventBus};
 use inference::{ApiBackendConfig, ChatMessage, GenerateRequest, InferenceManager, StreamChunk};
 
@@ -88,28 +88,66 @@ async fn update_companion(
     state.db.update_companion(&profile)
 }
 
+// --- Conversations ---
+
+#[tauri::command]
+async fn get_conversations(
+    state: State<'_, Arc<AppState>>,
+    companion_id: String,
+) -> Result<Vec<Conversation>, String> {
+    state.db.get_conversations(&companion_id)
+}
+
+#[tauri::command]
+async fn create_conversation(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    companion_id: String,
+    title: String,
+) -> Result<(), String> {
+    state.db.create_conversation(&id, &companion_id, &title)
+}
+
+#[tauri::command]
+async fn rename_conversation(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    title: String,
+) -> Result<(), String> {
+    state.db.rename_conversation(&id, &title)
+}
+
+#[tauri::command]
+async fn delete_conversation(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
+    state.db.delete_conversation(&id)
+}
+
 // --- Messages ---
 
 #[tauri::command]
 async fn get_messages(
     state: State<'_, Arc<AppState>>,
-    companion_id: String,
+    conversation_id: String,
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> Result<Vec<StoredMessage>, String> {
     state
         .db
-        .get_messages(&companion_id, limit.unwrap_or(100), offset.unwrap_or(0))
+        .get_messages(&conversation_id, limit.unwrap_or(100), offset.unwrap_or(0))
 }
 
 #[tauri::command]
 async fn save_message(
     state: State<'_, Arc<AppState>>,
     companion_id: String,
+    conversation_id: String,
     role: String,
     content: String,
 ) -> Result<i64, String> {
-    state.db.save_message(&companion_id, &role, &content)
+    state.db.save_message(&companion_id, &conversation_id, &role, &content)
 }
 
 // --- Chat / Inference ---
@@ -119,12 +157,16 @@ async fn send_message(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     companion_id: String,
+    conversation_id: String,
     user_message: String,
 ) -> Result<(), String> {
     // 1. Save user message
     state
         .db
-        .save_message(&companion_id, "user", &user_message)?;
+        .save_message(&companion_id, &conversation_id, "user", &user_message)?;
+
+    // Touch conversation's updated_at
+    state.db.touch_conversation(&conversation_id)?;
 
     state.events.emit(AppEvent::MessageReceived {
         companion_id: companion_id.clone(),
@@ -140,10 +182,10 @@ async fn send_message(
     // 3. Load settings for generation parameters
     let settings = state.db.get_settings()?;
 
-    // 4. Build message history for context
+    // 4. Build message history for context (scoped to this conversation)
     let history = state
         .db
-        .get_messages(&companion_id, settings.context_messages_limit, 0)?;
+        .get_messages(&conversation_id, settings.context_messages_limit, 0)?;
 
     let mut messages = Vec::new();
 
@@ -216,6 +258,7 @@ async fn send_message(
     let app_clone = app.clone();
     let state_for_save = state.inner().clone();
     let companion_id_for_save = companion_id.clone();
+    let conversation_id_for_save = conversation_id.clone();
 
     tokio::spawn(async move {
         let mut full_response = String::new();
@@ -233,6 +276,7 @@ async fn send_message(
                 if !full_response.is_empty() {
                     let _ = state_for_save.db.save_message(
                         &companion_id_for_save,
+                        &conversation_id_for_save,
                         "assistant",
                         &full_response,
                     );
@@ -354,6 +398,10 @@ pub fn run() {
             get_companion,
             create_companion,
             update_companion,
+            get_conversations,
+            create_conversation,
+            rename_conversation,
+            delete_conversation,
             get_messages,
             save_message,
             send_message,

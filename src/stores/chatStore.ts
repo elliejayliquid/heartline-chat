@@ -4,6 +4,7 @@ import {
   onStreamChunk,
   onStreamError,
   type CompanionProfile,
+  type Conversation,
   type StoredMessage,
   type AppSettings,
 } from "@/lib/tauri";
@@ -27,6 +28,10 @@ interface ChatState {
   companions: CompanionProfile[];
   activeCompanionId: string | null;
 
+  // Conversations
+  conversations: Conversation[];
+  activeConversationId: string | null;
+
   // Settings
   settings: AppSettings | null;
   backendConfigured: boolean;
@@ -43,6 +48,10 @@ interface ChatState {
   initialize: () => Promise<() => void>;
   sendMessage: (content: string) => Promise<void>;
   switchCompanion: (id: string) => Promise<void>;
+  switchConversation: (id: string) => Promise<void>;
+  createConversation: (companionId?: string) => Promise<void>;
+  deleteConversation: (id: string) => Promise<void>;
+  renameConversation: (id: string, title: string) => Promise<void>;
   loadSettings: () => Promise<void>;
   saveSettings: (settings: AppSettings) => Promise<void>;
   setSettingsOpen: (open: boolean) => void;
@@ -60,12 +69,37 @@ let unlistenChunk: UnlistenFn | null = null;
 let unlistenError: UnlistenFn | null = null;
 let reconnectInterval: ReturnType<typeof setInterval> | null = null;
 
+/**
+ * Ensure a companion has at least one conversation.
+ * If none exist, creates a default "New Chat" conversation.
+ * Returns the conversations list and the active conversation id.
+ */
+async function ensureConversation(
+  companionId: string
+): Promise<{ conversations: Conversation[]; activeConversationId: string }> {
+  let conversations = await api.getConversations(companionId);
+
+  if (conversations.length === 0) {
+    const newId = crypto.randomUUID();
+    await api.createConversation(newId, companionId, "New Chat");
+    conversations = await api.getConversations(companionId);
+  }
+
+  // Most recently updated conversation first (backend sorts by updated_at DESC)
+  return {
+    conversations,
+    activeConversationId: conversations[0].id,
+  };
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   isGenerating: false,
   streamingContent: "",
   companions: [],
   activeCompanionId: null,
+  conversations: [],
+  activeConversationId: null,
   settings: null,
   backendConfigured: false,
   settingsOpen: false,
@@ -79,12 +113,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       // Load companions from database
       const companions = await api.getCompanions();
-      const activeId = companions.length > 0 ? companions[0].id : null;
+      const activeCompanionId =
+        companions.length > 0 ? companions[0].id : null;
 
-      // Load messages for the active companion
+      // Load conversations + messages for the active companion
+      let conversations: Conversation[] = [];
+      let activeConversationId: string | null = null;
       let messages: Message[] = [];
-      if (activeId) {
-        const stored = await api.getMessages(activeId, 100);
+
+      if (activeCompanionId) {
+        const result = await ensureConversation(activeCompanionId);
+        conversations = result.conversations;
+        activeConversationId = result.activeConversationId;
+
+        const stored = await api.getMessages(activeConversationId, 100);
         messages = stored.map(storedToMessage);
       }
 
@@ -96,7 +138,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       set({
         companions,
-        activeCompanionId: activeId,
+        activeCompanionId,
+        conversations,
+        activeConversationId,
         messages,
         backendConfigured,
         settings,
@@ -190,8 +234,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendMessage: async (content: string) => {
-    const { activeCompanionId, isGenerating, backendConfigured } = get();
-    if (!activeCompanionId || isGenerating) return;
+    const {
+      activeCompanionId,
+      activeConversationId,
+      isGenerating,
+      backendConfigured,
+    } = get();
+    if (!activeCompanionId || !activeConversationId || isGenerating) return;
 
     if (!backendConfigured) {
       set({ settingsOpen: true });
@@ -212,7 +261,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
 
     try {
-      await api.sendMessage(activeCompanionId, content);
+      await api.sendMessage(activeCompanionId, activeConversationId, content);
+
+      // Auto-title: if the conversation title is "New Chat" and this is the first user message,
+      // rename it to a snippet of the first message
+      const { conversations } = get();
+      const conv = conversations.find((c) => c.id === activeConversationId);
+      if (conv && conv.title === "New Chat") {
+        const title =
+          content.length > 40 ? content.slice(0, 40) + "..." : content;
+        try {
+          await api.renameConversation(activeConversationId, title);
+          // Refresh conversation list to pick up the new title
+          const updated = await api.getConversations(activeCompanionId);
+          set({ conversations: updated });
+        } catch {
+          // Non-critical, ignore
+        }
+      }
     } catch (err) {
       console.error("Failed to send message:", err);
       // Mark as disconnected so auto-reconnect kicks in
@@ -236,17 +302,108 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (get().activeCompanionId === id) return;
 
     try {
-      const stored = await api.getMessages(id, 100);
+      const { conversations, activeConversationId } =
+        await ensureConversation(id);
+
+      const stored = await api.getMessages(activeConversationId, 100);
       const messages = stored.map(storedToMessage);
 
       set({
         activeCompanionId: id,
+        conversations,
+        activeConversationId,
         messages,
         streamingContent: "",
         isGenerating: false,
       });
     } catch (err) {
       console.error("Failed to switch companion:", err);
+    }
+  },
+
+  switchConversation: async (id: string) => {
+    if (get().activeConversationId === id) return;
+
+    try {
+      const stored = await api.getMessages(id, 100);
+      const messages = stored.map(storedToMessage);
+
+      set({
+        activeConversationId: id,
+        messages,
+        streamingContent: "",
+        isGenerating: false,
+      });
+    } catch (err) {
+      console.error("Failed to switch conversation:", err);
+    }
+  },
+
+  createConversation: async (companionId?: string) => {
+    const cid = companionId ?? get().activeCompanionId;
+    if (!cid) return;
+
+    try {
+      const newId = crypto.randomUUID();
+      await api.createConversation(newId, cid, "New Chat");
+
+      const conversations = await api.getConversations(cid);
+
+      set({
+        activeCompanionId: cid,
+        conversations,
+        activeConversationId: newId,
+        messages: [], // New conversation has no messages
+        streamingContent: "",
+        isGenerating: false,
+      });
+    } catch (err) {
+      console.error("Failed to create conversation:", err);
+    }
+  },
+
+  deleteConversation: async (id: string) => {
+    const { activeCompanionId, activeConversationId } = get();
+    if (!activeCompanionId) return;
+
+    try {
+      await api.deleteConversation(id);
+
+      // Re-fetch conversations
+      const result = await ensureConversation(activeCompanionId);
+
+      // If we deleted the active conversation, switch to the latest one
+      let newActiveId = activeConversationId;
+      let messages = get().messages;
+
+      if (id === activeConversationId) {
+        newActiveId = result.activeConversationId;
+        const stored = await api.getMessages(newActiveId, 100);
+        messages = stored.map(storedToMessage);
+      }
+
+      set({
+        conversations: result.conversations,
+        activeConversationId: newActiveId,
+        messages,
+        streamingContent: "",
+        isGenerating: false,
+      });
+    } catch (err) {
+      console.error("Failed to delete conversation:", err);
+    }
+  },
+
+  renameConversation: async (id: string, title: string) => {
+    const { activeCompanionId } = get();
+    if (!activeCompanionId) return;
+
+    try {
+      await api.renameConversation(id, title);
+      const conversations = await api.getConversations(activeCompanionId);
+      set({ conversations });
+    } catch (err) {
+      console.error("Failed to rename conversation:", err);
     }
   },
 
@@ -289,12 +446,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       await api.createCompanion(profile);
       const companions = await api.getCompanions();
+
+      // Create a default conversation for the new companion
+      const newConvId = crypto.randomUUID();
+      await api.createConversation(newConvId, profile.id, "New Chat");
+      const conversations = await api.getConversations(profile.id);
+
       set({
         companions,
         companionEditorOpen: false,
         editingCompanion: null,
         activeCompanionId: profile.id,
-        messages: [], // New companion has no messages yet
+        conversations,
+        activeConversationId: newConvId,
+        messages: [],
         streamingContent: "",
         isGenerating: false,
       });

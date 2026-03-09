@@ -11,12 +11,18 @@ export function ChatWindow() {
   const setSettingsOpen = useChatStore((s) => s.setSettingsOpen);
   const activeCompanionId = useChatStore((s) => s.activeCompanionId);
   const companions = useChatStore((s) => s.companions);
+  const conversations = useChatStore((s) => s.conversations);
+  const activeConversationId = useChatStore((s) => s.activeConversationId);
+  const createConversation = useChatStore((s) => s.createConversation);
 
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const activeCompanion = companions.find((c) => c.id === activeCompanionId);
+  const activeConversation = conversations.find(
+    (c) => c.id === activeConversationId
+  );
 
   // Auto-scroll to bottom on new messages or streaming
   useEffect(() => {
@@ -52,6 +58,46 @@ export function ChatWindow() {
 
   return (
     <div className="h-full flex flex-col">
+      {/* Conversation header */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border">
+        <div className="flex items-center gap-2 min-w-0">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0 text-text-muted"
+          >
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+          <span className="text-xs text-text-secondary truncate">
+            {activeConversation?.title ?? "No conversation"}
+          </span>
+        </div>
+        <button
+          onClick={() => createConversation()}
+          className="shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs text-text-muted hover:text-heartline hover:bg-surface-hover transition-all"
+          title="Start a new chat"
+        >
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          >
+            <line x1="7" y1="1" x2="7" y2="13" />
+            <line x1="1" y1="7" x2="13" y2="7" />
+          </svg>
+          New Chat
+        </button>
+      </div>
+
       {/* Backend not configured banner */}
       {!backendConfigured && (
         <div className="mx-3 mt-3 p-3 rounded-lg bg-accent-warm/10 border border-accent-warm/30 text-sm">
