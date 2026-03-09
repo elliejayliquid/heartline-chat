@@ -25,7 +25,7 @@ export function ChatsList() {
               {/* Companion row */}
               <button
                 onClick={() => switchCompanion(companion.id)}
-                className={`group w-full flex items-center gap-3 p-3 rounded-lg transition-all duration-200 text-left focus:outline-none ${
+                className={`group w-full flex items-center gap-3 p-3 rounded-lg text-left border border-transparent transition-colors duration-150 ${
                   isActive
                     ? "glass glow-border-subtle bg-heartline-soft"
                     : "hover:bg-surface-hover"

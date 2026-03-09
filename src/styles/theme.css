@@ -56,10 +56,16 @@ html, body, #root {
   font-family: var(--font-body);
 }
 
-/* Remove default focus outlines — we use our own glow effects */
-button:focus,
-[role="button"]:focus {
-  outline: none;
+/* Remove ALL default focus outlines — we use our own glow effects */
+*:focus,
+*:focus-visible {
+  outline: none !important;
+  box-shadow: none;
+}
+
+/* Restore glow-border-subtle only where we explicitly apply it */
+.glow-border-subtle {
+  box-shadow: 0 0 4px var(--color-heartline-glow) !important;
 }
 
 /* Custom scrollbar - cosmic themed */
