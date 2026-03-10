@@ -39,6 +39,45 @@ impl InferenceManager {
         backend.generate(request, sender).await
     }
 
+    /// Generate a non-streaming (complete) response.
+    /// Internally uses the streaming API but collects all chunks.
+    /// Useful for background tasks like rolling summaries.
+    pub async fn generate_complete(
+        &self,
+        request: GenerateRequest,
+    ) -> Result<String, String> {
+        let (tx, mut rx) = mpsc::channel::<StreamChunk>(128);
+
+        // Spawn the generation in a separate task
+        let lock = self.backend.read().await;
+        let backend = lock
+            .as_ref()
+            .ok_or_else(|| "No inference backend configured.".to_string())?
+            .clone();
+        drop(lock); // Release lock before spawning
+
+        tokio::spawn(async move {
+            let _ = backend.generate(request, tx).await;
+        });
+
+        // Collect all chunks
+        let mut full_text = String::new();
+        while let Some(chunk) = rx.recv().await {
+            if !chunk.delta.is_empty() {
+                full_text.push_str(&chunk.delta);
+            }
+            if chunk.done {
+                break;
+            }
+        }
+
+        if full_text.is_empty() {
+            return Err("Summary generation returned empty response".to_string());
+        }
+
+        Ok(full_text)
+    }
+
     /// Check if a backend is configured
     pub async fn is_configured(&self) -> bool {
         self.backend.read().await.is_some()

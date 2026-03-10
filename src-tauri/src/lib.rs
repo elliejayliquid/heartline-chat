@@ -5,6 +5,7 @@ mod inference;
 use db::{AppSettings, CompanionProfile, Conversation, Database, StoredMessage};
 use events::{AppEvent, EventBus};
 use inference::{ApiBackendConfig, ChatMessage, GenerateRequest, InferenceManager, StreamChunk};
+use serde::Serialize;
 
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -195,6 +196,20 @@ async fn send_message(
         content: companion.personality.clone(),
     });
 
+    // Inject rolling summary (if one exists) as context between system prompt and history
+    if let Ok(Some(summary)) = state.db.get_latest_summary(&conversation_id) {
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: format!(
+                "[Context: summary of earlier messages in this conversation. \
+                Use this to remember what was discussed, but continue speaking \
+                naturally in second person — address the user as \"you\", never \
+                refer to them in third person.]\n{}",
+                summary.summary
+            ),
+        });
+    }
+
     // Recent history (already includes the user message we just saved)
     for msg in &history {
         messages.push(ChatMessage {
@@ -203,14 +218,17 @@ async fn send_message(
         });
     }
 
-    // 5. Token-aware context trimming (rough estimate: 1 token ≈ 4 chars)
-    let estimate_tokens = |s: &str| -> u32 { (s.len() as u32) / 4 };
-
+    // 5. Token-aware context trimming
     let system_tokens = estimate_tokens(&companion.personality);
+    let summary_tokens = messages.get(1)
+        .filter(|m| m.content.starts_with("[Earlier in this conversation"))
+        .map(|m| estimate_tokens(&m.content))
+        .unwrap_or(0);
     let available = settings
         .context_window_size
         .saturating_sub(settings.max_tokens)
-        .saturating_sub(system_tokens);
+        .saturating_sub(system_tokens)
+        .saturating_sub(summary_tokens);
 
     // Walk backward from newest, keeping as many messages as fit
     let mut total: u32 = 0;
@@ -292,6 +310,177 @@ async fn send_message(
     });
 
     Ok(())
+}
+
+// --- Rolling Summaries (Adaptive) ---
+
+/// Rough token estimate: 1 token ≈ 4 characters
+fn estimate_tokens(s: &str) -> u32 {
+    (s.len() as u32) / 4
+}
+
+/// Compute the available token budget for conversation messages.
+/// Reserves space for: system prompt, summary slot, and model response generation.
+fn available_context_tokens(settings: &AppSettings) -> u32 {
+    // Overhead: system prompt (~200 tok) + summary text (~300 tok) + safety margin
+    let overhead: u32 = 600;
+    settings
+        .context_window_size
+        .saturating_sub(settings.max_tokens) // reserve space for the response
+        .saturating_sub(overhead)
+}
+
+/// Summary budget ratios (derived from context window, no magic numbers).
+///
+/// Example scenarios (assuming ~100 tokens/message average):
+///   4k context  → trigger after ~14 exchanges, keep ~7 raw, summarize ~7 per cycle
+///   8k context  → trigger after ~28 exchanges, keep ~14 raw, summarize ~14 per cycle
+///   32k context → trigger after ~110 exchanges, keep ~55 raw, summarize ~55 per cycle
+///   128k context → trigger after ~470 exchanges, keep ~235 raw, summarize ~235 per cycle
+const SUMMARY_TRIGGER_RATIO: u32 = 60;  // % of available: trigger when unsummarized exceeds this
+const SUMMARY_KEEP_RATIO: u32 = 30;     // % of available: keep this much recent context raw
+
+/// Result returned to frontend when checking summary status
+#[derive(Serialize, Clone)]
+struct SummaryStatus {
+    needs_summary: bool,
+    unsummarized_tokens: u32,
+    trigger_threshold: u32,
+}
+
+#[tauri::command]
+async fn check_summary_needed(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+) -> Result<SummaryStatus, String> {
+    let settings = state.db.get_settings()?;
+    let available = available_context_tokens(&settings);
+
+    // Trigger when unsummarized content exceeds SUMMARY_TRIGGER_RATIO% of available context.
+    // At that point the trimmer is starting to drop messages, and we risk
+    // losing information that hasn't been summarized yet.
+    let trigger_threshold = available * SUMMARY_TRIGGER_RATIO / 100;
+
+    // Efficient check: get total character length via SQL, convert to tokens
+    let content_length = state.db.get_unsummarized_content_length(&conversation_id)?;
+    let unsummarized_tokens = (content_length as u32) / 4;
+
+    Ok(SummaryStatus {
+        needs_summary: unsummarized_tokens >= trigger_threshold,
+        unsummarized_tokens,
+        trigger_threshold,
+    })
+}
+
+#[tauri::command]
+async fn generate_summary(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+) -> Result<bool, String> {
+    let settings = state.db.get_settings()?;
+    let available = available_context_tokens(&settings);
+
+    // Keep enough recent messages to fill SUMMARY_KEEP_RATIO% of available context.
+    // Everything older gets summarized. The gap between trigger and keep
+    // (60% - 30% = 30% of available) is the batch size per summarization cycle.
+    let keep_recent_budget = available * SUMMARY_KEEP_RATIO / 100;
+
+    // 1. Get ALL unsummarized messages
+    let all_unsummarized = state.db.get_unsummarized_messages(&conversation_id)?;
+
+    if all_unsummarized.is_empty() {
+        return Ok(false);
+    }
+
+    // 2. Walk backward from newest, find the split point based on token budget
+    let mut recent_tokens: u32 = 0;
+    let mut split_index = all_unsummarized.len(); // default: nothing to summarize
+
+    for i in (0..all_unsummarized.len()).rev() {
+        let msg_tokens = estimate_tokens(&all_unsummarized[i].content);
+        if recent_tokens + msg_tokens > keep_recent_budget {
+            split_index = i + 1; // keep from here onward as recent
+            break;
+        }
+        recent_tokens += msg_tokens;
+        if i == 0 {
+            split_index = 0; // all messages fit in the recent budget
+        }
+    }
+
+    // Messages before split_index get summarized
+    let to_summarize = &all_unsummarized[..split_index];
+
+    if to_summarize.is_empty() {
+        return Ok(false); // Everything fits in the recent budget, nothing to compress
+    }
+
+    // 3. Get the previous summary (if any) to build on
+    let previous_summary = state.db.get_latest_summary(&conversation_id)?;
+
+    // 4. Build the summarization prompt
+    // The summary is written FROM the companion's perspective, referring to the
+    // human as "the user" — but the injection wrapper (above) instructs the
+    // companion to translate back to "you" when speaking.
+    let mut prompt = String::from(
+        "You are summarizing a conversation between an AI companion and a user. \
+        Write a concise summary that captures:\n\
+        - Key topics discussed\n\
+        - Important facts, preferences, or personal details the user shared \
+        (name, interests, life situation, etc.)\n\
+        - Emotional tone and how the relationship is developing\n\
+        - Any plans, promises, or things to follow up on\n\n\
+        Refer to the human as \"the user\" and the AI as \"the companion\".\n\n",
+    );
+
+    if let Some(ref prev) = previous_summary {
+        prompt.push_str("Previous summary to build on:\n");
+        prompt.push_str(&prev.summary);
+        prompt.push_str("\n\n");
+    }
+
+    prompt.push_str("New messages to incorporate:\n\n");
+
+    for msg in to_summarize {
+        let role_label = if msg.role == "user" { "User" } else { "Companion" };
+        prompt.push_str(&format!("{}: {}\n", role_label, msg.content));
+    }
+
+    prompt.push_str(
+        "\nWrite an updated summary (2-4 paragraphs) that merges any previous summary \
+        with these new messages. Focus on what the companion needs to remember \
+        to continue the conversation naturally. Be concise but preserve specific \
+        details (names, preferences, facts).",
+    );
+
+    // 5. Generate summary via inference (non-streaming)
+    let request = GenerateRequest {
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }],
+        model: None,
+        temperature: Some(0.3), // Low temp for factual summarization
+        max_tokens: Some(512),
+        stream: true, // generate_complete still uses streaming internally
+    };
+
+    let summary_text = state.inference.generate_complete(request).await?;
+
+    // 6. Save to database
+    let start_id = to_summarize.first().unwrap().id;
+    let end_id = to_summarize.last().unwrap().id;
+    let count = to_summarize.len() as u32;
+
+    state.db.save_rolling_summary(
+        &conversation_id,
+        &summary_text,
+        start_id,
+        end_id,
+        count,
+    )?;
+
+    Ok(true)
 }
 
 #[tauri::command]
@@ -405,6 +594,8 @@ pub fn run() {
             get_messages,
             save_message,
             send_message,
+            check_summary_needed,
+            generate_summary,
             check_backend_status,
         ])
         .run(tauri::generate_context!())

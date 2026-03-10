@@ -218,9 +218,9 @@ Assembles the final prompt sent to the model:
 
 ```
 [System prompt / companion personality]
+[Rolling summary of earlier messages (if exists)]       ← NEW
 [Identity profile (stable behavioral traits)]           # Future
 [Relevant long-term memories (retrieved by function)]    # Future
-[Conversation summary (if history is long)]              # Future
 [Recent message history (last N messages, token-trimmed)]
 [Current user message]
 ```
@@ -228,11 +228,18 @@ Assembles the final prompt sent to the model:
 **Currently implemented:**
 - Token-aware context trimming (rough estimate: 1 token ≈ 4 chars)
 - Configurable context window size (2K–128K presets) and messages limit
-- Automatic oldest-message trimming to fit within `context_window - max_tokens - system_prompt`
+- Automatic oldest-message trimming to fit within `context_window - max_tokens - system_prompt - summary_tokens`
 - Messages scoped to active conversation (not companion-wide)
+- **Rolling summaries** — adaptive, context-aware compression of older messages:
+  - Trigger and keep-recent budgets derived from `context_window_size` (no magic numbers)
+  - Trigger at 60% of available context, keep 30% as raw recent messages, compress the rest
+  - Summary injected as system message between personality prompt and recent history
+  - Includes 2nd-person guardrail to prevent companion from switching to 3rd-person
+  - Background generation after each response (non-blocking, uses same inference backend)
+  - Summaries accumulate — each new summary incorporates the previous one
+  - `generate_complete()` helper on InferenceManager for non-streaming background tasks
 
 **Future:**
-- Summarize old messages rather than dropping them (rolling summaries)
 - Inject relevant memories from semantic search
 - Purpose-based memory retrieval (preferences, emotional continuity, identity)
 
@@ -708,9 +715,14 @@ The scheduler runs as a background task in the Rust backend. When it decides to 
 - [ ] Ollama backend support
 - [ ] Model download from HuggingFace (stretch)
 
-### Phase 3 - Memory
+### Phase 3 - Memory (in progress)
 
-- [ ] Rolling summaries (triggered every N messages, stored per conversation)
+- [x] Rolling summaries — adaptive context-aware compression stored per conversation
+  - Trigger/keep budgets scale with context window (4K→128K)
+  - Background generation via `generate_complete()` (non-streaming inference helper)
+  - Summary injection into context with 2nd-person guardrail
+  - Efficient SQL-based token pressure check (`SUM(LENGTH(content))`)
+  - Orphaned summary cleanup on conversation delete
 - [ ] Memory extraction pipeline (facts, preferences, relationship shifts via sidecar model)
 - [ ] Memory entry types with confidence, stability, and revision support
 - [ ] Vector embedding + semantic retrieval (SQLite vector extension or qdrant-embedded)
@@ -840,4 +852,4 @@ HeartlineChat/
 
 ---
 
-*Last updated: 2026-03-09*
+*Last updated: 2026-03-09 (Phase 3 rolling summaries)*

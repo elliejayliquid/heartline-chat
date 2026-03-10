@@ -39,6 +39,17 @@ pub struct StoredMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollingSummary {
+    pub id: i64,
+    pub conversation_id: String,
+    pub summary: String,
+    pub messages_start_id: i64,  // First message ID covered by this summary
+    pub messages_end_id: i64,    // Last message ID covered by this summary
+    pub message_count: u32,      // How many messages were summarized
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub api_base_url: String,
     pub api_key: String,
@@ -90,6 +101,20 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_conversations_companion
                 ON conversations(companion_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS rolling_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                messages_start_id INTEGER NOT NULL,
+                messages_end_id INTEGER NOT NULL,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_summaries_conversation
+                ON rolling_summaries(conversation_id, created_at DESC);
 
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -356,7 +381,13 @@ impl Database {
 
     pub fn delete_conversation(&self, id: &str) -> Result<(), String> {
         let conn = self.conn.lock().unwrap();
-        // Delete messages first (foreign key discipline)
+        // Delete dependent data first (foreign key discipline)
+        conn.execute(
+            "DELETE FROM rolling_summaries WHERE conversation_id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("Delete summaries error: {}", e))?;
+
         conn.execute(
             "DELETE FROM messages WHERE conversation_id = ?1",
             params![id],
@@ -439,6 +470,125 @@ impl Database {
         .map_err(|e| format!("Insert error: {}", e))?;
 
         Ok(conn.last_insert_rowid())
+    }
+
+    // --- Rolling summary operations ---
+
+    /// Save a rolling summary for a conversation
+    pub fn save_rolling_summary(
+        &self,
+        conversation_id: &str,
+        summary: &str,
+        messages_start_id: i64,
+        messages_end_id: i64,
+        message_count: u32,
+    ) -> Result<i64, String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO rolling_summaries (conversation_id, summary, messages_start_id, messages_end_id, message_count)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![conversation_id, summary, messages_start_id, messages_end_id, message_count],
+        )
+        .map_err(|e| format!("Insert error: {}", e))?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Get the latest rolling summary for a conversation
+    pub fn get_latest_summary(&self, conversation_id: &str) -> Result<Option<RollingSummary>, String> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, conversation_id, summary, messages_start_id, messages_end_id, message_count, created_at
+             FROM rolling_summaries
+             WHERE conversation_id = ?1
+             ORDER BY created_at DESC
+             LIMIT 1",
+            params![conversation_id],
+            |row| {
+                Ok(RollingSummary {
+                    id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    summary: row.get(2)?,
+                    messages_start_id: row.get(3)?,
+                    messages_end_id: row.get(4)?,
+                    message_count: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            },
+        );
+
+        match result {
+            Ok(summary) => Ok(Some(summary)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Query error: {}", e)),
+        }
+    }
+
+    /// Get total character length of unsummarized messages (efficient SQL, no full load).
+    /// Used by the adaptive summary trigger to estimate token pressure.
+    pub fn get_unsummarized_content_length(&self, conversation_id: &str) -> Result<u64, String> {
+        let conn = self.conn.lock().unwrap();
+
+        let last_summarized_id: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(messages_end_id), 0) FROM rolling_summaries WHERE conversation_id = ?1",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let total_length: u64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM messages WHERE conversation_id = ?1 AND id > ?2",
+                params![conversation_id, last_summarized_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        Ok(total_length)
+    }
+
+    /// Get ALL unsummarized messages for a conversation (chronological order).
+    /// The caller is responsible for splitting by token budget.
+    pub fn get_unsummarized_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<StoredMessage>, String> {
+        let conn = self.conn.lock().unwrap();
+
+        let last_summarized_id: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(messages_end_id), 0) FROM rolling_summaries WHERE conversation_id = ?1",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, companion_id, conversation_id, role, content, timestamp, emotion
+                 FROM messages
+                 WHERE conversation_id = ?1 AND id > ?2
+                 ORDER BY id ASC",
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        let messages: Vec<StoredMessage> = stmt
+            .query_map(params![conversation_id, last_summarized_id], |row| {
+                Ok(StoredMessage {
+                    id: row.get(0)?,
+                    companion_id: row.get(1)?,
+                    conversation_id: row.get(2)?,
+                    role: row.get(3)?,
+                    content: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    emotion: row.get(6)?,
+                })
+            })
+            .map_err(|e| format!("Query error: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(messages)
     }
 
     // --- Settings operations ---

@@ -47,6 +47,12 @@ export interface StreamChunk {
   done: boolean;
 }
 
+export interface SummaryStatus {
+  needs_summary: boolean;
+  unsummarized_tokens: number;
+  trigger_threshold: number;
+}
+
 // --- API calls to Rust backend ---
 
 export const api = {
@@ -88,6 +94,12 @@ export const api = {
   sendMessage: (companionId: string, conversationId: string, userMessage: string) =>
     invoke<void>("send_message", { companionId, conversationId, userMessage }),
   checkBackendStatus: () => invoke<boolean>("check_backend_status"),
+
+  // Rolling Summaries
+  checkSummaryNeeded: (conversationId: string) =>
+    invoke<SummaryStatus>("check_summary_needed", { conversationId }),
+  generateSummary: (conversationId: string) =>
+    invoke<boolean>("generate_summary", { conversationId }),
 };
 
 // --- Event listeners ---

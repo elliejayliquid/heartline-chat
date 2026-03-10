@@ -175,6 +175,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
             } else {
               set({ isGenerating: false });
             }
+
+            // Background: check if rolling summary is needed
+            const { activeConversationId } = get();
+            if (activeConversationId) {
+              api
+                .checkSummaryNeeded(activeConversationId)
+                .then((status) => {
+                  if (status.needs_summary) {
+                    console.log(
+                      `[Memory] Generating rolling summary (${status.unsummarized_tokens} tokens unsummarized, threshold: ${status.trigger_threshold})...`
+                    );
+                    api
+                      .generateSummary(activeConversationId)
+                      .then((generated) => {
+                        if (generated) {
+                          console.log("[Memory] Rolling summary saved.");
+                        }
+                      })
+                      .catch((err) =>
+                        console.warn("[Memory] Summary generation failed:", err)
+                      );
+                  }
+                })
+                .catch(() => {
+                  // Non-critical, silently ignore
+                });
+            }
           } else {
             set((state) => ({
               streamingContent: state.streamingContent + chunk.delta,
