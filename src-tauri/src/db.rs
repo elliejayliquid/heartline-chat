@@ -50,6 +50,25 @@ pub struct RollingSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub id: i64,
+    pub companion_id: String,
+    pub memory_type: String,   // personal_fact, moment, preference, relationship_shift, identity_note
+    pub content: String,
+    pub source: String,        // stated, observed, pattern
+    pub confidence: String,    // high, medium, low
+    pub importance: u32,
+    pub tags: String,          // JSON array
+    pub source_message_id: Option<i64>,
+    pub supersedes: Option<i64>,
+    pub created_at: String,
+    pub last_confirmed: Option<String>,
+    pub retrieval_count: u32,
+    pub last_accessed: Option<String>,
+    // embedding stored as BLOB in DB, not included in serialized struct
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub api_base_url: String,
     pub api_key: String,
@@ -60,6 +79,10 @@ pub struct AppSettings {
     // Context management
     pub context_window_size: u32,
     pub context_messages_limit: u32,
+    // Memory sidecar
+    pub memory_enabled: bool,
+    pub sidecar_model: String,
+    pub embedding_model: String,
 }
 
 impl Database {
@@ -115,6 +138,28 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_summaries_conversation
                 ON rolling_summaries(conversation_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                companion_id TEXT NOT NULL,
+                memory_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'observed',
+                confidence TEXT NOT NULL DEFAULT 'medium',
+                importance INTEGER NOT NULL DEFAULT 5,
+                tags TEXT NOT NULL DEFAULT '[]',
+                source_message_id INTEGER,
+                supersedes INTEGER,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_confirmed TEXT,
+                retrieval_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed TEXT,
+                embedding BLOB,
+                FOREIGN KEY (companion_id) REFERENCES companions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_memories_companion
+                ON memories(companion_id, importance DESC);
 
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -591,6 +636,209 @@ impl Database {
         Ok(messages)
     }
 
+    // --- Memory operations ---
+
+    /// Save a new memory for a companion, including its embedding vector
+    pub fn save_memory(
+        &self,
+        companion_id: &str,
+        content: &str,
+        memory_type: &str,
+        source: &str,
+        confidence: &str,
+        importance: u32,
+        tags: &str,
+        embedding: Option<&[f32]>,
+    ) -> Result<i64, String> {
+        let conn = self.conn.lock().unwrap();
+
+        // Convert f32 slice to bytes for BLOB storage
+        let embedding_bytes: Option<Vec<u8>> = embedding.map(|emb| {
+            emb.iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect()
+        });
+
+        conn.execute(
+            "INSERT INTO memories (companion_id, content, memory_type, source, confidence, importance, tags, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                companion_id,
+                content,
+                memory_type,
+                source,
+                confidence,
+                importance,
+                tags,
+                embedding_bytes,
+            ],
+        )
+        .map_err(|e| format!("Insert memory error: {}", e))?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Search memories by cosine similarity against a query embedding.
+    /// Loads all companion embeddings and computes similarity in Rust.
+    pub fn search_memories_by_embedding(
+        &self,
+        companion_id: &str,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<Memory>, String> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, companion_id, memory_type, content, source, confidence, importance,
+                        tags, source_message_id, supersedes, created_at, last_confirmed,
+                        retrieval_count, last_accessed, embedding
+                 FROM memories
+                 WHERE companion_id = ?1 AND embedding IS NOT NULL",
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        let rows: Vec<(Memory, Vec<f32>)> = stmt
+            .query_map(params![companion_id], |row| {
+                let embedding_blob: Vec<u8> = row.get(14)?;
+                // Convert bytes back to f32 vec
+                let embedding: Vec<f32> = embedding_blob
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+
+                Ok((
+                    Memory {
+                        id: row.get(0)?,
+                        companion_id: row.get(1)?,
+                        memory_type: row.get(2)?,
+                        content: row.get(3)?,
+                        source: row.get(4)?,
+                        confidence: row.get(5)?,
+                        importance: row.get(6)?,
+                        tags: row.get(7)?,
+                        source_message_id: row.get(8)?,
+                        supersedes: row.get(9)?,
+                        created_at: row.get(10)?,
+                        last_confirmed: row.get(11)?,
+                        retrieval_count: row.get(12)?,
+                        last_accessed: row.get(13)?,
+                    },
+                    embedding,
+                ))
+            })
+            .map_err(|e| format!("Query error: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Compute cosine similarity for each memory
+        let query_norm: f32 = query_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if query_norm == 0.0 {
+            return Ok(Vec::new());
+        }
+
+        let mut scored: Vec<(f32, Memory)> = rows
+            .into_iter()
+            .filter_map(|(memory, emb)| {
+                let emb_norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if emb_norm == 0.0 {
+                    return None;
+                }
+                let dot: f32 = query_embedding
+                    .iter()
+                    .zip(emb.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+                let similarity = dot / (query_norm * emb_norm);
+                Some((similarity, memory))
+            })
+            .collect();
+
+        // Sort by similarity descending
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Take top_k
+        let results: Vec<Memory> = scored
+            .into_iter()
+            .take(top_k)
+            .filter(|(sim, _)| *sim > 0.3) // Minimum similarity threshold
+            .map(|(_, memory)| memory)
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Increment retrieval_count and update last_accessed for a set of memory IDs
+    pub fn touch_memories(&self, ids: &[i64]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        for id in ids {
+            conn.execute(
+                "UPDATE memories SET retrieval_count = retrieval_count + 1, last_accessed = datetime('now') WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|e| format!("Update memory error: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// Get total memory count for a companion
+    pub fn get_companion_memory_count(&self, companion_id: &str) -> Result<u32, String> {
+        let conn = self.conn.lock().unwrap();
+        let count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE companion_id = ?1",
+                params![companion_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+        Ok(count)
+    }
+
+    /// Get the last N messages from a conversation (for memory extraction).
+    /// Returns in chronological order.
+    pub fn get_last_messages(
+        &self,
+        conversation_id: &str,
+        count: u32,
+    ) -> Result<Vec<StoredMessage>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, companion_id, conversation_id, role, content, timestamp, emotion
+                 FROM messages
+                 WHERE conversation_id = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        let mut messages: Vec<StoredMessage> = stmt
+            .query_map(params![conversation_id, count], |row| {
+                Ok(StoredMessage {
+                    id: row.get(0)?,
+                    companion_id: row.get(1)?,
+                    conversation_id: row.get(2)?,
+                    role: row.get(3)?,
+                    content: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    emotion: row.get(6)?,
+                })
+            })
+            .map_err(|e| format!("Query error: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        messages.reverse(); // Chronological order
+        Ok(messages)
+    }
+
     // --- Settings operations ---
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, String> {
@@ -645,6 +893,16 @@ impl Database {
                 .get_setting("context_messages_limit")?
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(50),
+            memory_enabled: self
+                .get_setting("memory_enabled")?
+                .and_then(|v| v.parse::<bool>().ok())
+                .unwrap_or(true),
+            sidecar_model: self
+                .get_setting("sidecar_model")?
+                .unwrap_or_else(|| "smollm3:3b".to_string()),
+            embedding_model: self
+                .get_setting("embedding_model")?
+                .unwrap_or_else(|| "all-minilm".to_string()),
         })
     }
 
@@ -656,6 +914,9 @@ impl Database {
         self.set_setting("max_tokens", &settings.max_tokens.to_string())?;
         self.set_setting("context_window_size", &settings.context_window_size.to_string())?;
         self.set_setting("context_messages_limit", &settings.context_messages_limit.to_string())?;
+        self.set_setting("memory_enabled", &settings.memory_enabled.to_string())?;
+        self.set_setting("sidecar_model", &settings.sidecar_model)?;
+        self.set_setting("embedding_model", &settings.embedding_model)?;
         Ok(())
     }
 }

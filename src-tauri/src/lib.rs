@@ -5,7 +5,7 @@ mod inference;
 use db::{AppSettings, CompanionProfile, Conversation, Database, StoredMessage};
 use events::{AppEvent, EventBus};
 use inference::{ApiBackendConfig, ChatMessage, GenerateRequest, InferenceManager, StreamChunk};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -16,6 +16,52 @@ pub struct AppState {
     pub db: Database,
     pub inference: InferenceManager,
     pub events: EventBus,
+}
+
+// ============================================================
+// Helpers — Ollama model auto-pull
+// ============================================================
+
+/// Check if the API URL points to a local Ollama instance
+fn is_ollama_url(url: &str) -> bool {
+    url.contains("localhost:11434") || url.contains("127.0.0.1:11434")
+}
+
+/// Pull a model from Ollama using its native /api/pull endpoint.
+/// Streams progress so we don't hit request timeouts on large models.
+async fn pull_ollama_model(base_url: &str, model_name: &str) -> Result<(), String> {
+    let base = base_url.trim_end_matches('/');
+    let ollama_base = base.strip_suffix("/v1").unwrap_or(base);
+    let url = format!("{}/api/pull", ollama_base);
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // No overall timeout — model pulls can take minutes for large models
+        .build()
+        .map_err(|e| format!("Client error: {}", e))?;
+
+    let mut response = client
+        .post(&url)
+        .json(&serde_json::json!({"name": model_name, "stream": true}))
+        .send()
+        .await
+        .map_err(|e| format!("Pull request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Pull failed: {}", body));
+    }
+
+    // Consume streaming progress until done
+    while let Some(_chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("Pull stream error: {}", e))?
+    {
+        // Ollama sends JSON lines with download progress — just consume them
+    }
+
+    Ok(())
 }
 
 // ============================================================
@@ -31,6 +77,7 @@ async fn get_settings(state: State<'_, Arc<AppState>>) -> Result<AppSettings, St
 
 #[tauri::command]
 async fn save_settings(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     settings: AppSettings,
 ) -> Result<(), String> {
@@ -52,6 +99,58 @@ async fn save_settings(
         key: "api".to_string(),
         value: "updated".to_string(),
     });
+
+    // Auto-pull memory models when enabled with Ollama
+    if settings.memory_enabled && is_ollama_url(&settings.api_base_url) {
+        let base_url = settings.api_base_url.clone();
+        let sidecar_model = settings.sidecar_model.clone();
+        let embedding_model = settings.embedding_model.clone();
+        let app_handle = app.clone();
+
+        tokio::spawn(async move {
+            // Pull embedding model first (smaller, ~90MB)
+            let _ = app_handle.emit(
+                "model-pull-status",
+                format!("Pulling {}...", embedding_model),
+            );
+            match pull_ollama_model(&base_url, &embedding_model).await {
+                Ok(_) => {
+                    let _ = app_handle.emit(
+                        "model-pull-status",
+                        format!("✓ {} ready", embedding_model),
+                    );
+                }
+                Err(e) => {
+                    let _ = app_handle.emit(
+                        "model-pull-status",
+                        format!("✗ {}: {}", embedding_model, e),
+                    );
+                }
+            }
+
+            // Pull sidecar model (~2GB)
+            let _ = app_handle.emit(
+                "model-pull-status",
+                format!("Pulling {}...", sidecar_model),
+            );
+            match pull_ollama_model(&base_url, &sidecar_model).await {
+                Ok(_) => {
+                    let _ = app_handle.emit(
+                        "model-pull-status",
+                        format!("✓ {} ready", sidecar_model),
+                    );
+                }
+                Err(e) => {
+                    let _ = app_handle.emit(
+                        "model-pull-status",
+                        format!("✗ {}: {}", sidecar_model, e),
+                    );
+                }
+            }
+
+            let _ = app_handle.emit("model-pull-status", "Memory models ready");
+        });
+    }
 
     Ok(())
 }
@@ -210,6 +309,44 @@ async fn send_message(
         });
     }
 
+    // Inject relevant memories (if enabled and we have an embedding model)
+    let mut memory_tokens: u32 = 0;
+    if settings.memory_enabled {
+        if let Ok(query_embedding) = state
+            .inference
+            .embed_text(&user_message, Some(settings.embedding_model.clone()))
+            .await
+        {
+            if let Ok(memories) = state
+                .db
+                .search_memories_by_embedding(&companion_id, &query_embedding, 5)
+            {
+                if !memories.is_empty() {
+                    // Touch retrieved memories (update retrieval_count)
+                    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+                    let _ = state.db.touch_memories(&ids);
+
+                    let mut memory_block = String::from(
+                        "[Memories about the user — reference these naturally when relevant, \
+                        don't force them into conversation]\n",
+                    );
+                    for mem in &memories {
+                        memory_block.push_str(&format!(
+                            "- {} ({} confidence, {})\n",
+                            mem.content, mem.confidence, mem.memory_type
+                        ));
+                    }
+
+                    memory_tokens = estimate_tokens(&memory_block);
+                    messages.push(ChatMessage {
+                        role: "system".to_string(),
+                        content: memory_block,
+                    });
+                }
+            }
+        }
+    }
+
     // Recent history (already includes the user message we just saved)
     for msg in &history {
         messages.push(ChatMessage {
@@ -221,19 +358,25 @@ async fn send_message(
     // 5. Token-aware context trimming
     let system_tokens = estimate_tokens(&companion.personality);
     let summary_tokens = messages.get(1)
-        .filter(|m| m.content.starts_with("[Earlier in this conversation"))
+        .filter(|m| m.content.starts_with("[Context: summary of earlier messages"))
         .map(|m| estimate_tokens(&m.content))
         .unwrap_or(0);
     let available = settings
         .context_window_size
         .saturating_sub(settings.max_tokens)
         .saturating_sub(system_tokens)
-        .saturating_sub(summary_tokens);
+        .saturating_sub(summary_tokens)
+        .saturating_sub(memory_tokens);
 
-    // Walk backward from newest, keeping as many messages as fit
+    // How many preamble messages to always keep (system prompt + optional summary + optional memories)
+    let preamble_count: usize = 1
+        + if summary_tokens > 0 { 1 } else { 0 }
+        + if memory_tokens > 0 { 1 } else { 0 };
+
+    // Walk backward from newest history messages, keeping as many as fit
     let mut total: u32 = 0;
     let mut keep_from = messages.len();
-    for i in (1..messages.len()).rev() {
+    for i in (preamble_count..messages.len()).rev() {
         let msg_tokens = estimate_tokens(&messages[i].content);
         if total + msg_tokens > available {
             break;
@@ -242,10 +385,11 @@ async fn send_message(
         keep_from = i;
     }
 
-    // Trim: keep system prompt (index 0) + messages that fit
-    if keep_from > 1 {
-        let system = messages[0].clone();
-        messages = std::iter::once(system)
+    // Trim: keep all preamble messages + history messages that fit
+    if keep_from > preamble_count {
+        let preamble: Vec<ChatMessage> = messages[..preamble_count].to_vec();
+        messages = preamble
+            .into_iter()
             .chain(messages[keep_from..].iter().cloned())
             .collect();
     }
@@ -483,6 +627,131 @@ async fn generate_summary(
     Ok(true)
 }
 
+// --- Memory Extraction Sidecar ---
+
+#[tauri::command]
+async fn extract_memories(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    companion_id: String,
+) -> Result<u32, String> {
+    let settings = state.db.get_settings()?;
+
+    // Bail if memory extraction is disabled
+    if !settings.memory_enabled {
+        return Ok(0);
+    }
+
+    // Get the last 2 messages (user + assistant exchange)
+    let last_messages = state.db.get_last_messages(&conversation_id, 2)?;
+    if last_messages.len() < 2 {
+        return Ok(0); // Need at least a user+assistant pair
+    }
+
+    // Build the extraction prompt
+    let mut exchange = String::new();
+    for msg in &last_messages {
+        let role_label = if msg.role == "user" { "User" } else { "Companion" };
+        exchange.push_str(&format!("{}: {}\n", role_label, msg.content));
+    }
+
+    let prompt = format!(
+        r#"Analyze this conversation exchange and extract any notable facts worth remembering long-term.
+
+Rules:
+- Only extract facts that would be useful to remember in FUTURE conversations
+- If nothing is notable, output: {{"memories": [], "nothing_notable": true}}
+- Be selective — most exchanges have nothing worth extracting
+- Never extract trivial pleasantries or conversational filler
+
+Types: personal_fact, moment, preference, relationship_shift, identity_note
+Source: stated (user explicitly said it), observed (happened in conversation), pattern (inferred from behavior)
+Confidence: high, medium, low
+
+Exchange:
+{exchange}
+
+Output a JSON object with a "memories" array. Each memory has: content (string), memory_type (string), source (string), confidence (string), importance (1-10), tags (array of strings).
+Output ONLY valid JSON, no markdown formatting, no explanation."#
+    );
+
+    let request = GenerateRequest {
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }],
+        model: Some(settings.sidecar_model.clone()),
+        temperature: Some(0.1), // Very low temp for structured extraction
+        max_tokens: Some(512),
+        stream: true,
+    };
+
+    let response = state.inference.generate_complete(request).await?;
+
+    // Parse the JSON response — be lenient with formatting
+    let json_str = response.trim();
+    // Try to extract JSON if wrapped in markdown code blocks
+    let json_str = json_str
+        .strip_prefix("```json")
+        .or_else(|| json_str.strip_prefix("```"))
+        .unwrap_or(json_str);
+    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+    #[derive(Deserialize)]
+    struct ExtractedMemory {
+        content: String,
+        memory_type: Option<String>,
+        source: Option<String>,
+        confidence: Option<String>,
+        importance: Option<u32>,
+        tags: Option<Vec<String>>,
+    }
+
+    #[derive(Deserialize)]
+    struct ExtractionResult {
+        memories: Vec<ExtractedMemory>,
+        #[serde(default)]
+        nothing_notable: bool,
+    }
+
+    let parsed: ExtractionResult = serde_json::from_str(json_str)
+        .map_err(|e| format!("Failed to parse extraction response: {} — raw: {}", e, json_str))?;
+
+    if parsed.nothing_notable || parsed.memories.is_empty() {
+        return Ok(0);
+    }
+
+    // Embed and save each memory
+    let mut count: u32 = 0;
+    for mem in &parsed.memories {
+        // Generate embedding for this memory
+        let embedding = state
+            .inference
+            .embed_text(&mem.content, Some(settings.embedding_model.clone()))
+            .await
+            .ok(); // Non-fatal if embedding fails
+
+        let tags_json = serde_json::to_string(
+            &mem.tags.clone().unwrap_or_default()
+        ).unwrap_or_else(|_| "[]".to_string());
+
+        state.db.save_memory(
+            &companion_id,
+            &mem.content,
+            mem.memory_type.as_deref().unwrap_or("personal_fact"),
+            mem.source.as_deref().unwrap_or("observed"),
+            mem.confidence.as_deref().unwrap_or("medium"),
+            mem.importance.unwrap_or(5),
+            &tags_json,
+            embedding.as_deref(),
+        )?;
+
+        count += 1;
+    }
+
+    Ok(count)
+}
+
 #[tauri::command]
 async fn check_backend_status(
     state: State<'_, Arc<AppState>>,
@@ -542,9 +811,7 @@ pub fn run() {
 
             // Auto-start Ollama if settings point to it
             if let Ok(settings) = state.db.get_settings() {
-                if settings.api_base_url.contains("127.0.0.1:11434")
-                    || settings.api_base_url.contains("localhost:11434")
-                {
+                if is_ollama_url(&settings.api_base_url) {
                     // Spawn "ollama serve" in background — harmlessly fails if already running
                     let _ = std::process::Command::new("ollama")
                         .arg("serve")
@@ -554,17 +821,43 @@ pub fn run() {
                 }
             }
 
-            // Try to configure backend from saved settings
+            // Try to configure backend from saved settings + auto-pull memory models
             let state_clone = state.clone();
+            let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(settings) = state_clone.db.get_settings() {
                     if !settings.api_base_url.is_empty() {
                         let config = ApiBackendConfig {
-                            base_url: settings.api_base_url,
-                            api_key: settings.api_key,
-                            default_model: settings.default_model,
+                            base_url: settings.api_base_url.clone(),
+                            api_key: settings.api_key.clone(),
+                            default_model: settings.default_model.clone(),
                         };
                         let _ = state_clone.inference.configure_api_backend(config).await;
+                    }
+
+                    // Auto-pull memory models on startup if enabled + Ollama
+                    if settings.memory_enabled && is_ollama_url(&settings.api_base_url) {
+                        // Small delay — let Ollama finish starting up
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                        let _ = app_handle.emit(
+                            "model-pull-status",
+                            "Ensuring memory models are available...",
+                        );
+
+                        if let Err(e) = pull_ollama_model(
+                            &settings.api_base_url, &settings.embedding_model
+                        ).await {
+                            eprintln!("[Memory] Embedding model pull: {}", e);
+                        }
+
+                        if let Err(e) = pull_ollama_model(
+                            &settings.api_base_url, &settings.sidecar_model
+                        ).await {
+                            eprintln!("[Memory] Sidecar model pull: {}", e);
+                        }
+
+                        let _ = app_handle.emit("model-pull-status", "Memory models ready");
                     }
                 }
             });
@@ -596,6 +889,7 @@ pub fn run() {
             send_message,
             check_summary_needed,
             generate_summary,
+            extract_memories,
             check_backend_status,
         ])
         .run(tauri::generate_context!())

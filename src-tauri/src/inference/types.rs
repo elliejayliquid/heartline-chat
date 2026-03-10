@@ -41,6 +41,13 @@ pub struct ApiBackendConfig {
     pub default_model: String,
 }
 
+/// Request to generate a text embedding
+#[derive(Debug, Clone)]
+pub struct EmbedRequest {
+    pub input: String,
+    pub model: Option<String>,
+}
+
 /// The trait every inference backend must implement.
 /// This is the plugin boundary - community plugins implement this trait.
 #[async_trait::async_trait]
@@ -51,6 +58,9 @@ pub trait InferenceBackend: Send + Sync {
         request: GenerateRequest,
         sender: tokio::sync::mpsc::Sender<StreamChunk>,
     ) -> Result<(), String>;
+
+    /// Generate a text embedding vector
+    async fn embed(&self, request: EmbedRequest) -> Result<Vec<f32>, String>;
 
     /// Get this backend's capabilities
     fn capabilities(&self) -> BackendCapabilities;

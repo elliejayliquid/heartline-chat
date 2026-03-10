@@ -3,6 +3,7 @@ import {
   api,
   onStreamChunk,
   onStreamError,
+  onModelPullStatus,
   type CompanionProfile,
   type Conversation,
   type StoredMessage,
@@ -67,6 +68,7 @@ interface ChatState {
 let listenersSetUp = false;
 let unlistenChunk: UnlistenFn | null = null;
 let unlistenError: UnlistenFn | null = null;
+let unlistenPull: UnlistenFn | null = null;
 let reconnectInterval: ReturnType<typeof setInterval> | null = null;
 
 /**
@@ -154,6 +156,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         unlistenChunk?.();
         unlistenError?.();
+        unlistenPull?.();
+
+        unlistenPull = await onModelPullStatus((status) => {
+          console.log(`[Models] ${status}`);
+        });
 
         unlistenChunk = await onStreamChunk((chunk) => {
           if (chunk.done) {
@@ -176,9 +183,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               set({ isGenerating: false });
             }
 
-            // Background: check if rolling summary is needed
-            const { activeConversationId } = get();
+            // Background: check if rolling summary is needed + extract memories
+            const { activeConversationId, activeCompanionId } = get();
             if (activeConversationId) {
+              // Rolling summary check
               api
                 .checkSummaryNeeded(activeConversationId)
                 .then((status) => {
@@ -201,6 +209,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 .catch(() => {
                   // Non-critical, silently ignore
                 });
+
+              // Memory extraction (fire-and-forget via sidecar model)
+              if (activeCompanionId) {
+                api
+                  .extractMemories(activeConversationId, activeCompanionId)
+                  .then((count) => {
+                    if (count > 0) {
+                      console.log(
+                        `[Memory] Extracted ${count} memories from this exchange.`
+                      );
+                    }
+                  })
+                  .catch(() => {
+                    // Non-critical, silently ignore
+                  });
+              }
             }
           } else {
             set((state) => ({
@@ -252,6 +276,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     return () => {
       unlistenChunk?.();
       unlistenError?.();
+      unlistenPull?.();
       listenersSetUp = false;
       if (reconnectInterval) {
         clearInterval(reconnectInterval);

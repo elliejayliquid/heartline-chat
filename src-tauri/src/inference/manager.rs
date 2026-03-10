@@ -78,6 +78,27 @@ impl InferenceManager {
         Ok(full_text)
     }
 
+    /// Generate a text embedding using the active backend
+    pub async fn embed_text(
+        &self,
+        text: &str,
+        model: Option<String>,
+    ) -> Result<Vec<f32>, String> {
+        let lock = self.backend.read().await;
+        let backend = lock
+            .as_ref()
+            .ok_or_else(|| "No inference backend configured.".to_string())?
+            .clone();
+        drop(lock);
+
+        let request = EmbedRequest {
+            input: text.to_string(),
+            model,
+        };
+
+        backend.embed(request).await
+    }
+
     /// Check if a backend is configured
     pub async fn is_configured(&self) -> bool {
         self.backend.read().await.is_some()

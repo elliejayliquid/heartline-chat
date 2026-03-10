@@ -29,6 +29,26 @@ struct ApiMessage {
     content: String,
 }
 
+// --- Embedding API types ---
+
+#[derive(Serialize)]
+struct EmbedApiRequest {
+    model: String,
+    input: String,
+}
+
+#[derive(Deserialize)]
+struct EmbedApiResponse {
+    data: Vec<EmbedApiData>,
+}
+
+#[derive(Deserialize)]
+struct EmbedApiData {
+    embedding: Vec<f32>,
+}
+
+// --- Chat completion API types ---
+
 #[derive(Deserialize)]
 struct ApiStreamResponse {
     choices: Vec<ApiStreamChoice>,
@@ -175,6 +195,50 @@ impl InferenceBackend for ApiBackend {
             .await;
 
         Ok(())
+    }
+
+    async fn embed(&self, request: EmbedRequest) -> Result<Vec<f32>, String> {
+        let model = request
+            .model
+            .unwrap_or_else(|| "all-minilm".to_string());
+
+        let api_request = EmbedApiRequest {
+            model,
+            input: request.input,
+        };
+
+        let url = format!("{}/embeddings", self.config.base_url.trim_end_matches('/'));
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", "application/json")
+            .json(&api_request)
+            .send()
+            .await
+            .map_err(|e| format!("Embedding request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".to_string());
+            return Err(format!("Embedding API error {}: {}", status, body));
+        }
+
+        let parsed: EmbedApiResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse embedding response: {}", e))?;
+
+        parsed
+            .data
+            .into_iter()
+            .next()
+            .map(|d| d.embedding)
+            .ok_or_else(|| "Embedding response contained no data".to_string())
     }
 
     fn capabilities(&self) -> BackendCapabilities {

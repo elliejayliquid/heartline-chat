@@ -13,6 +13,10 @@ export interface AppSettings {
   // Context management
   context_window_size: number;
   context_messages_limit: number;
+  // Memory sidecar
+  memory_enabled: boolean;
+  sidecar_model: string;
+  embedding_model: string;
 }
 
 export interface CompanionProfile {
@@ -100,6 +104,10 @@ export const api = {
     invoke<SummaryStatus>("check_summary_needed", { conversationId }),
   generateSummary: (conversationId: string) =>
     invoke<boolean>("generate_summary", { conversationId }),
+
+  // Memory Extraction
+  extractMemories: (conversationId: string, companionId: string) =>
+    invoke<number>("extract_memories", { conversationId, companionId }),
 };
 
 // --- Event listeners ---
@@ -108,6 +116,14 @@ export function onStreamChunk(
   callback: (chunk: StreamChunk) => void
 ): Promise<UnlistenFn> {
   return listen<StreamChunk>("stream-chunk", (event) => {
+    callback(event.payload);
+  });
+}
+
+export function onModelPullStatus(
+  callback: (status: string) => void
+): Promise<UnlistenFn> {
+  return listen<string>("model-pull-status", (event) => {
     callback(event.payload);
   });
 }

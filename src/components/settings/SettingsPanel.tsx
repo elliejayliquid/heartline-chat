@@ -16,6 +16,9 @@ export function SettingsPanel() {
     max_tokens: 1024,
     context_window_size: 4096,
     context_messages_limit: 50,
+    memory_enabled: true,
+    sidecar_model: "smollm3:3b",
+    embedding_model: "all-minilm",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -261,6 +264,79 @@ export function SettingsPanel() {
               />
               <p className="text-xs text-text-muted mt-1">
                 Max messages loaded from DB before token trimming.
+              </p>
+            </div>
+          </div>
+
+          {/* ── Memory ── */}
+          <div className="border-t border-surface-border pt-5">
+            <label className="block text-xs text-text-secondary mb-3 uppercase tracking-wider">
+              Memory
+            </label>
+
+            {/* Enable/Disable Toggle */}
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <label className="text-sm text-text-primary">
+                  Memory Extraction
+                </label>
+                <p className="text-xs text-text-muted mt-0.5">
+                  Extract facts from conversations for long-term recall
+                </p>
+              </div>
+              <button
+                onClick={() =>
+                  setForm((f) => ({ ...f, memory_enabled: !f.memory_enabled }))
+                }
+                className={`w-10 h-5 rounded-full transition-all relative ${
+                  form.memory_enabled
+                    ? "bg-heartline/60"
+                    : "bg-surface-border"
+                }`}
+              >
+                <div
+                  className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
+                    form.memory_enabled ? "left-5" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Sidecar Model */}
+            <div className={`mb-4 transition-opacity ${form.memory_enabled ? "opacity-100" : "opacity-40 pointer-events-none"}`}>
+              <label className="block text-xs text-text-secondary mb-1.5 uppercase tracking-wider">
+                Sidecar Model
+              </label>
+              <input
+                type="text"
+                value={form.sidecar_model}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, sidecar_model: e.target.value }))
+                }
+                className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
+                placeholder="smollm3:3b"
+              />
+              <p className="text-xs text-text-muted mt-1">
+                Small model for fact extraction. Runs via the same API endpoint.
+              </p>
+            </div>
+
+            {/* Embedding Model */}
+            <div className={`transition-opacity ${form.memory_enabled ? "opacity-100" : "opacity-40 pointer-events-none"}`}>
+              <label className="block text-xs text-text-secondary mb-1.5 uppercase tracking-wider">
+                Embedding Model
+              </label>
+              <input
+                type="text"
+                value={form.embedding_model}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, embedding_model: e.target.value }))
+                }
+                className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
+                placeholder="all-minilm"
+              />
+              <p className="text-xs text-text-muted mt-1">
+                Model for semantic search (~90MB). Uses /v1/embeddings endpoint.
               </p>
             </div>
           </div>
