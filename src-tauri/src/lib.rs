@@ -746,12 +746,13 @@ DO NOT EXTRACT:
 - Inferred emotional states or vibes; only save if the user directly stated it as a persistent trait (e.g. "I'm always anxious", "I love mornings")
 
 CRITICAL: If a memory you are about to write is already captured in the existing memories list — same fact, same person, even if worded differently — output {{"memories": [], "nothing_notable": true}} instead of duplicating it.
+CRITICAL: Extract ONLY from the [NEWEST EXCHANGE] section. The recent context is provided so you understand the conversation — do NOT extract memories from it, only use it as background.
 PREFER updating an existing memory over creating a new one.
 When in doubt, output nothing. Most exchanges have nothing worth saving.
 {summary_block}{existing_memories_block}
-Recent context:
+Recent context (background only — do NOT extract from this):
 {context_block}
-[NEWEST EXCHANGE — focus here]
+[NEWEST EXCHANGE — extract only from here]
 {exchange_block}
 Output ONLY raw JSON. Pick ONE memory_type per memory.
 If nothing notable: {{"memories": [], "nothing_notable": true}}
