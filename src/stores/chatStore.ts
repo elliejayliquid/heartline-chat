@@ -70,6 +70,7 @@ let unlistenChunk: UnlistenFn | null = null;
 let unlistenError: UnlistenFn | null = null;
 let unlistenPull: UnlistenFn | null = null;
 let reconnectInterval: ReturnType<typeof setInterval> | null = null;
+let memoryExtractionTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * Ensure a companion has at least one conversation.
@@ -211,27 +212,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   console.warn("[Summary] Check failed:", err);
                 });
 
-              // Memory extraction (fire-and-forget via sidecar model)
+              // Memory extraction — debounced so rapid exchanges only trigger once
               if (activeCompanionId) {
-                console.log(
-                  `[Memory] Triggering memory extraction for conversation=${activeConversationId}, companion=${activeCompanionId}`
-                );
-                api
-                  .extractMemories(activeConversationId, activeCompanionId)
-                  .then((count) => {
-                    if (count > 0) {
-                      console.log(
-                        `[Memory] ✓ Extracted ${count} memories from this exchange.`
-                      );
-                    } else {
-                      console.log(
-                        "[Memory] Nothing notable extracted (0 memories)."
-                      );
-                    }
-                  })
-                  .catch((err) => {
-                    console.error("[Memory] ✗ Extraction failed:", err);
-                  });
+                const convId = activeConversationId;
+                const compId = activeCompanionId;
+                if (memoryExtractionTimer) clearTimeout(memoryExtractionTimer);
+                memoryExtractionTimer = setTimeout(() => {
+                  memoryExtractionTimer = null;
+                  console.log(
+                    `[Memory] Triggering memory extraction for conversation=${convId}, companion=${compId}`
+                  );
+                  api
+                    .extractMemories(convId, compId)
+                    .then((count) => {
+                      if (count > 0) {
+                        console.log(
+                          `[Memory] ✓ Extracted ${count} memories from this exchange.`
+                        );
+                      } else {
+                        console.log(
+                          "[Memory] Nothing notable extracted (0 memories)."
+                        );
+                      }
+                    })
+                    .catch((err) => {
+                      console.error("[Memory] ✗ Extraction failed:", err);
+                    });
+                }, 4000); // 4s debounce — waits for burst typing to settle
               }
             }
           } else {

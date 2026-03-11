@@ -766,7 +766,7 @@ Example: {{"memories": [{{"content": "User's name is Alex", "memory_type": "pers
         }],
         model: Some(settings.sidecar_model.clone()),
         temperature: Some(0.1), // Very low temp for structured extraction
-        max_tokens: Some(512),
+        max_tokens: Some(2048), // Thinking models need room for <think> block before JSON
         stream: true,
     };
 
@@ -785,10 +785,16 @@ Example: {{"memories": [{{"content": "User's name is Alex", "memory_type": "pers
     // Parse the JSON response — be lenient with formatting
     let mut json_str = response.trim();
 
-    // Strip <think>...</think> blocks (reasoning models like SmolLM3)
-    if let Some(think_end) = json_str.find("</think>") {
+    // Strip <think>...</think> blocks (reasoning models like Qwen3)
+    if let Some(think_start) = json_str.find("<think>") {
+        if let Some(think_end) = json_str.find("</think>") {
+            let thinking = &json_str[think_start + 7..think_end];
+            eprintln!("[Memory:Think] {}", thinking.trim());
+            json_str = json_str[think_end + 8..].trim();
+        }
+    } else if let Some(think_end) = json_str.find("</think>") {
+        // Handle case where <think> was already at the start (trimmed)
         json_str = json_str[think_end + 8..].trim();
-        eprintln!("[Memory] Stripped <think> block from response");
     }
 
     // Try to extract JSON if wrapped in markdown code blocks
