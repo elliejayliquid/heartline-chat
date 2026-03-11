@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useChatStore } from "@/stores/chatStore";
-import type { CompanionProfile } from "@/lib/tauri";
+import { api, type CompanionProfile, type Memory } from "@/lib/tauri";
 
 export function CompanionEditor() {
   const isOpen = useChatStore((s) => s.companionEditorOpen);
@@ -18,6 +18,12 @@ export function CompanionEditor() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Memory state
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [memoriesLoading, setMemoriesLoading] = useState(false);
+  const [memoriesExpanded, setMemoriesExpanded] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+
   // Sync form when opening
   useEffect(() => {
     if (isOpen && editingCompanion) {
@@ -25,8 +31,17 @@ export function CompanionEditor() {
         name: editingCompanion.name,
         personality: editingCompanion.personality,
       });
+      // Load memories for this companion
+      setMemoriesLoading(true);
+      setMemoriesExpanded(false);
+      api
+        .getCompanionMemories(editingCompanion.id)
+        .then((mems) => setMemories(mems))
+        .catch((err) => console.error("Failed to load memories:", err))
+        .finally(() => setMemoriesLoading(false));
     } else if (isOpen) {
       setForm({ name: "", personality: "" });
+      setMemories([]);
     }
     setError(null);
   }, [isOpen, editingCompanion]);
@@ -64,6 +79,32 @@ export function CompanionEditor() {
     }
   };
 
+  const handleDeleteMemory = async (id: number) => {
+    setDeletingId(id);
+    try {
+      await api.deleteMemory(id);
+      setMemories((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      console.error("Failed to delete memory:", err);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const typeColors: Record<string, string> = {
+    personal_fact: "text-blue-400 bg-blue-500/15 border-blue-500/30",
+    preference: "text-purple-400 bg-purple-500/15 border-purple-500/30",
+    moment: "text-amber-400 bg-amber-500/15 border-amber-500/30",
+    relationship_shift: "text-pink-400 bg-pink-500/15 border-pink-500/30",
+    identity_note: "text-emerald-400 bg-emerald-500/15 border-emerald-500/30",
+  };
+
+  const confidenceColors: Record<string, string> = {
+    high: "text-green-400",
+    medium: "text-yellow-400",
+    low: "text-red-400",
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="glass glow-border rounded-xl w-full max-w-lg mx-4 overflow-hidden">
@@ -84,7 +125,7 @@ export function CompanionEditor() {
         </div>
 
         {/* Content */}
-        <div className="p-6 space-y-5 overflow-y-auto max-h-[60vh]">
+        <div className="p-6 space-y-5 overflow-y-auto max-h-[70vh]">
           {/* Name */}
           <div>
             <label className="block text-xs text-text-secondary mb-1.5 uppercase tracking-wider">
@@ -118,6 +159,107 @@ export function CompanionEditor() {
               This defines who your companion is. The more detail, the more consistent their personality.
             </p>
           </div>
+
+          {/* Memories Section — only when editing */}
+          {isEditing && (
+            <div className="border-t border-surface-border pt-5">
+              <button
+                onClick={() => setMemoriesExpanded(!memoriesExpanded)}
+                className="flex items-center justify-between w-full group"
+              >
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-text-secondary uppercase tracking-wider cursor-pointer group-hover:text-text-primary transition-colors">
+                    Memories
+                  </label>
+                  <span className="text-xs text-text-muted bg-space-700/60 px-2 py-0.5 rounded-full">
+                    {memoriesLoading ? "..." : memories.length}
+                  </span>
+                </div>
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 12 12"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  className={`text-text-muted transition-transform duration-200 ${memoriesExpanded ? "rotate-180" : ""
+                    }`}
+                >
+                  <polyline points="2,4 6,8 10,4" />
+                </svg>
+              </button>
+
+              {memoriesExpanded && (
+                <div className="mt-3 space-y-2">
+                  {memoriesLoading ? (
+                    <div className="text-center py-6 text-text-muted text-sm">
+                      Loading memories...
+                    </div>
+                  ) : memories.length === 0 ? (
+                    <div className="text-center py-6 text-text-muted text-sm">
+                      No memories yet — keep chatting and they'll appear here ✨
+                    </div>
+                  ) : (
+                    memories.map((mem) => (
+                      <div
+                        key={mem.id}
+                        className={`group/card relative glass rounded-lg px-4 py-3 border border-surface-border hover:border-surface-border/80 transition-all ${deletingId === mem.id ? "opacity-40" : ""
+                          }`}
+                      >
+                        {/* Delete button */}
+                        <button
+                          onClick={() => handleDeleteMemory(mem.id)}
+                          disabled={deletingId === mem.id}
+                          className="absolute top-2 right-2 w-6 h-6 rounded flex items-center justify-center opacity-0 group-hover/card:opacity-100 hover:bg-red-500/20 text-text-muted hover:text-red-400 transition-all"
+                          title="Delete memory"
+                        >
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+                            <line x1="1" y1="1" x2="9" y2="9" />
+                            <line x1="9" y1="1" x2="1" y2="9" />
+                          </svg>
+                        </button>
+
+                        {/* Content */}
+                        <p className="text-sm text-text-primary pr-6 leading-relaxed">
+                          {mem.content}
+                        </p>
+
+                        {/* Meta badges */}
+                        <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                          {/* Type badge */}
+                          <span
+                            className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${typeColors[mem.memory_type] ??
+                              "text-text-muted bg-space-700/50 border-surface-border"
+                              }`}
+                          >
+                            {mem.memory_type.replace("_", " ")}
+                          </span>
+
+                          {/* Confidence */}
+                          <span
+                            className={`text-[10px] ${confidenceColors[mem.confidence] ?? "text-text-muted"
+                              }`}
+                          >
+                            {mem.confidence}
+                          </span>
+
+                          {/* Importance */}
+                          <span className="text-[10px] text-text-muted" title={`Importance: ${mem.importance}/10`}>
+                            ⚡{mem.importance}
+                          </span>
+
+                          {/* Date */}
+                          <span className="text-[10px] text-text-muted ml-auto">
+                            {new Date(mem.created_at + "Z").toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Error */}
           {error && (

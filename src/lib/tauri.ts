@@ -57,6 +57,23 @@ export interface SummaryStatus {
   trigger_threshold: number;
 }
 
+export interface Memory {
+  id: number;
+  companion_id: string;
+  memory_type: string;
+  content: string;
+  source: string;
+  confidence: string;
+  importance: number;
+  tags: string;
+  source_message_id: number | null;
+  supersedes: number | null;
+  created_at: string;
+  last_confirmed: string | null;
+  retrieval_count: number;
+  last_accessed: string | null;
+}
+
 // --- API calls to Rust backend ---
 
 export const api = {
@@ -108,6 +125,12 @@ export const api = {
   // Memory Extraction
   extractMemories: (conversationId: string, companionId: string) =>
     invoke<number>("extract_memories", { conversationId, companionId }),
+
+  // Memory Management
+  getCompanionMemories: (companionId: string) =>
+    invoke<Memory[]>("get_companion_memories", { companionId }),
+  deleteMemory: (id: number) =>
+    invoke<void>("delete_memory", { id }),
 };
 
 // --- Event listeners ---

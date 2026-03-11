@@ -134,6 +134,21 @@ html, body, #root {
   animation: pulse-glow 2s ease-in-out infinite;
 }
 
+@keyframes toast-in {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(16px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+.animate-toast-in {
+  animation: toast-in 0.35s cubic-bezier(0.21, 1.02, 0.73, 1) forwards;
+}
+
 /* ============================================
    Starfield background (CSS-only base layer)
    ============================================ */

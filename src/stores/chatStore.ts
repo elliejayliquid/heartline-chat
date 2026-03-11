@@ -190,39 +190,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
               api
                 .checkSummaryNeeded(activeConversationId)
                 .then((status) => {
+                  console.log(
+                    `[Summary] Status: ${status.unsummarized_tokens} tokens unsummarized, threshold: ${status.trigger_threshold}, needs_summary: ${status.needs_summary}`
+                  );
                   if (status.needs_summary) {
-                    console.log(
-                      `[Memory] Generating rolling summary (${status.unsummarized_tokens} tokens unsummarized, threshold: ${status.trigger_threshold})...`
-                    );
+                    console.log("[Summary] Generating rolling summary...");
                     api
                       .generateSummary(activeConversationId)
                       .then((generated) => {
                         if (generated) {
-                          console.log("[Memory] Rolling summary saved.");
+                          console.log("[Summary] Rolling summary saved.");
                         }
                       })
                       .catch((err) =>
-                        console.warn("[Memory] Summary generation failed:", err)
+                        console.warn("[Summary] Summary generation failed:", err)
                       );
                   }
                 })
-                .catch(() => {
-                  // Non-critical, silently ignore
+                .catch((err) => {
+                  console.warn("[Summary] Check failed:", err);
                 });
 
               // Memory extraction (fire-and-forget via sidecar model)
               if (activeCompanionId) {
+                console.log(
+                  `[Memory] Triggering memory extraction for conversation=${activeConversationId}, companion=${activeCompanionId}`
+                );
                 api
                   .extractMemories(activeConversationId, activeCompanionId)
                   .then((count) => {
                     if (count > 0) {
                       console.log(
-                        `[Memory] Extracted ${count} memories from this exchange.`
+                        `[Memory] ✓ Extracted ${count} memories from this exchange.`
+                      );
+                    } else {
+                      console.log(
+                        "[Memory] Nothing notable extracted (0 memories)."
                       );
                     }
                   })
-                  .catch(() => {
-                    // Non-critical, silently ignore
+                  .catch((err) => {
+                    console.error("[Memory] ✗ Extraction failed:", err);
                   });
               }
             }

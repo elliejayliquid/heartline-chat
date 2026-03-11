@@ -30,6 +30,8 @@ fn is_ollama_url(url: &str) -> bool {
 /// Pull a model from Ollama using its native /api/pull endpoint.
 /// Streams progress so we don't hit request timeouts on large models.
 async fn pull_ollama_model(base_url: &str, model_name: &str) -> Result<(), String> {
+    eprintln!("[Pull] Pulling model '{}' from {}...", model_name, base_url);
+
     let base = base_url.trim_end_matches('/');
     let ollama_base = base.strip_suffix("/v1").unwrap_or(base);
     let url = format!("{}/api/pull", ollama_base);
@@ -48,20 +50,53 @@ async fn pull_ollama_model(base_url: &str, model_name: &str) -> Result<(), Strin
         .map_err(|e| format!("Pull request failed: {}", e))?;
 
     if !response.status().is_success() {
+        let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("Pull failed: {}", body));
+        return Err(format!("Pull failed (HTTP {}): {}", status, body));
     }
 
-    // Consume streaming progress until done
-    while let Some(_chunk) = response
+    // Consume streaming progress and check for errors in the response.
+    // Ollama streams JSON lines like: {"status":"pulling ...","digest":"...","total":123,"completed":45}
+    // The final line on success contains: {"status":"success"}
+    // On error, a line may contain: {"error":"..."}
+    let mut last_line = String::new();
+    while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|e| format!("Pull stream error: {}", e))?
     {
-        // Ollama sends JSON lines with download progress — just consume them
+        if let Ok(text) = std::str::from_utf8(&chunk) {
+            // Each chunk may contain multiple JSON lines
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Check for error in any line
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    if let Some(error) = parsed.get("error").and_then(|v| v.as_str()) {
+                        eprintln!("[Pull] ✗ Model '{}' error from Ollama: {}", model_name, error);
+                        return Err(format!("Ollama pull error: {}", error));
+                    }
+                }
+
+                last_line = trimmed.to_string();
+            }
+        }
     }
 
-    Ok(())
+    // Verify the final status was "success"
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&last_line) {
+        if parsed.get("status").and_then(|v| v.as_str()) == Some("success") {
+            eprintln!("[Pull] ✓ Model '{}' ready", model_name);
+            return Ok(());
+        }
+    }
+
+    // If we got here, the stream ended without a clear success
+    eprintln!("[Pull] ⚠ Model '{}' pull finished but last status unclear: {}", model_name, last_line);
+    Ok(()) // Benefit of the doubt — Ollama may just not report "success" on cached pulls
 }
 
 // ============================================================
@@ -635,44 +670,92 @@ async fn extract_memories(
     conversation_id: String,
     companion_id: String,
 ) -> Result<u32, String> {
+    eprintln!("[Memory] extract_memories called: conversation={}, companion={}", conversation_id, companion_id);
+
     let settings = state.db.get_settings()?;
 
     // Bail if memory extraction is disabled
     if !settings.memory_enabled {
+        eprintln!("[Memory] Skipping — memory_enabled is false");
         return Ok(0);
     }
 
-    // Get the last 2 messages (user + assistant exchange)
-    let last_messages = state.db.get_last_messages(&conversation_id, 2)?;
-    if last_messages.len() < 2 {
-        return Ok(0); // Need at least a user+assistant pair
+    eprintln!("[Memory] Using sidecar_model={}, embedding_model={}", settings.sidecar_model, settings.embedding_model);
+
+    // Get last 12 messages for context; need at least 2 (a user+assistant pair)
+    let all_messages = state.db.get_last_messages(&conversation_id, 12)?;
+    if all_messages.len() < 2 {
+        eprintln!("[Memory] Skipping — only {} messages (need 2)", all_messages.len());
+        return Ok(0);
     }
 
-    // Build the extraction prompt
-    let mut exchange = String::new();
-    for msg in &last_messages {
+    // Split into context window (older turns) and newest exchange (last 2)
+    let newest_exchange = &all_messages[all_messages.len().saturating_sub(2)..];
+    let context_window = &all_messages[..all_messages.len().saturating_sub(2)];
+
+    // Build context window block
+    let mut context_block = String::new();
+    for msg in context_window {
         let role_label = if msg.role == "user" { "User" } else { "Companion" };
-        exchange.push_str(&format!("{}: {}\n", role_label, msg.content));
+        context_block.push_str(&format!("{}: {}\n", role_label, msg.content));
     }
+
+    // Build newest exchange block
+    let mut exchange_block = String::new();
+    for msg in newest_exchange {
+        let role_label = if msg.role == "user" { "User" } else { "Companion" };
+        exchange_block.push_str(&format!("{}: {}\n", role_label, msg.content));
+    }
+
+    // Fetch session summary if available
+    let summary_block = match state.db.get_latest_summary(&conversation_id)? {
+        Some(s) => format!("\nSession summary so far:\n{}\n", s.summary),
+        None => String::new(),
+    };
+
+    // Fetch existing memories as update candidates (top 10 most recent)
+    let existing_memories_block = {
+        let mems = state.db.get_companion_memories(&companion_id).unwrap_or_default();
+        if mems.is_empty() {
+            String::new()
+        } else {
+            let mut block = String::from("\nExisting memories (prefer updating over creating duplicates):\n");
+            for m in mems.iter().take(10) {
+                block.push_str(&format!("- [{}] {}\n", m.memory_type, m.content));
+            }
+            block
+        }
+    };
 
     let prompt = format!(
-        r#"Analyze this conversation exchange and extract any notable facts worth remembering long-term.
+        r#"You are a memory extraction agent. Your job is to decide what, if anything, from the newest exchange is worth remembering long-term about the user.
 
-Rules:
-- Only extract facts that would be useful to remember in FUTURE conversations
-- If nothing is notable, output: {{"memories": [], "nothing_notable": true}}
-- Be selective — most exchanges have nothing worth extracting
-- Never extract trivial pleasantries or conversational filler
+You have access to recent conversation context, a session summary, and existing memories.
 
-Types: personal_fact, moment, preference, relationship_shift, identity_note
-Source: stated (user explicitly said it), observed (happened in conversation), pattern (inferred from behavior)
-Confidence: high, medium, low
+EXTRACT only:
+- Durable facts the user shared about themselves (name, job, hobbies, relationships, life events)
+- Stable preferences or opinions that would be useful in future conversations
+- Meaningful relationship moments (emotional breakthroughs, commitments, recurring themes)
 
-Exchange:
-{exchange}
+DO NOT EXTRACT:
+- Jokes, casual banter, or one-off comments unless clearly reinforced
+- Greetings, small talk, or mood that is obviously momentary
+- Generic observations or paraphrasing without added meaning
+- Anything about how the companion behaves or speaks
+- Characterizations or descriptions the companion made about the user — only extract what the USER explicitly stated about themselves
+- Inferred emotional states or vibes; only save if the user directly stated it as a persistent trait (e.g. "I'm always anxious", "I love mornings")
 
-Output a JSON object with a "memories" array. Each memory has: content (string), memory_type (string), source (string), confidence (string), importance (1-10), tags (array of strings).
-Output ONLY valid JSON, no markdown formatting, no explanation."#
+CRITICAL: If a memory you are about to write is already captured in the existing memories list — same fact, same person, even if worded differently — output {{"memories": [], "nothing_notable": true}} instead of duplicating it.
+PREFER updating an existing memory over creating a new one.
+When in doubt, output nothing. Most exchanges have nothing worth saving.
+{summary_block}{existing_memories_block}
+Recent context:
+{context_block}
+[NEWEST EXCHANGE — focus here]
+{exchange_block}
+Output ONLY raw JSON. Pick ONE memory_type per memory.
+If nothing notable: {{"memories": [], "nothing_notable": true}}
+Example: {{"memories": [{{"content": "User's name is Alex", "memory_type": "personal_fact", "source": "stated", "confidence": "high", "importance": 7, "tags": ["name"]}}], "nothing_notable": false}}"#
     );
 
     let request = GenerateRequest {
@@ -686,16 +769,54 @@ Output ONLY valid JSON, no markdown formatting, no explanation."#
         stream: true,
     };
 
-    let response = state.inference.generate_complete(request).await?;
+    eprintln!("[Memory] Sending extraction request to {}...", settings.sidecar_model);
+    let response = match state.inference.generate_complete(request).await {
+        Ok(r) => {
+            eprintln!("[Memory] Raw sidecar response ({} chars): {}", r.len(), &r[..r.len().min(500)]);
+            r
+        }
+        Err(e) => {
+            eprintln!("[Memory] ✗ Sidecar generation failed: {}", e);
+            return Err(e);
+        }
+    };
 
     // Parse the JSON response — be lenient with formatting
-    let json_str = response.trim();
+    let mut json_str = response.trim();
+
+    // Strip <think>...</think> blocks (reasoning models like SmolLM3)
+    if let Some(think_end) = json_str.find("</think>") {
+        json_str = json_str[think_end + 8..].trim();
+        eprintln!("[Memory] Stripped <think> block from response");
+    }
+
     // Try to extract JSON if wrapped in markdown code blocks
     let json_str = json_str
         .strip_prefix("```json")
         .or_else(|| json_str.strip_prefix("```"))
         .unwrap_or(json_str);
     let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+    // Handle trailing garbage (e.g. model outputs `{...}{"nothing_notable": false}`)
+    // Find the end of the first complete JSON object by counting braces
+    let json_str = {
+        let mut depth = 0i32;
+        let mut end_pos = json_str.len();
+        for (i, ch) in json_str.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &json_str[..end_pos]
+    };
 
     #[derive(Deserialize)]
     struct ExtractedMemory {
@@ -714,12 +835,20 @@ Output ONLY valid JSON, no markdown formatting, no explanation."#
         nothing_notable: bool,
     }
 
-    let parsed: ExtractionResult = serde_json::from_str(json_str)
-        .map_err(|e| format!("Failed to parse extraction response: {} — raw: {}", e, json_str))?;
+    let parsed: ExtractionResult = match serde_json::from_str(json_str) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[Memory] ✗ JSON parse failed: {} — cleaned input: {}", e, json_str);
+            return Err(format!("Failed to parse extraction response: {} — raw: {}", e, json_str));
+        }
+    };
 
     if parsed.nothing_notable || parsed.memories.is_empty() {
+        eprintln!("[Memory] Nothing notable in this exchange.");
         return Ok(0);
     }
+
+    eprintln!("[Memory] Found {} memories to save", parsed.memories.len());
 
     // Embed and save each memory
     let mut count: u32 = 0;
@@ -731,12 +860,29 @@ Output ONLY valid JSON, no markdown formatting, no explanation."#
             .await
             .ok(); // Non-fatal if embedding fails
 
+        // Semantic dedup: if a very similar memory already exists, reinforce it instead of inserting
+        if let Some(ref emb) = embedding {
+            match state.db.find_similar_memory(&companion_id, emb, 0.85) {
+                Ok(Some(existing)) => {
+                    eprintln!(
+                        "[Memory] Near-duplicate detected (≥0.85), reinforcing existing #{}: \"{}\"",
+                        existing.id, existing.content
+                    );
+                    let _ = state.db.reinforce_memory(existing.id);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("[Memory] Similarity check failed (non-fatal): {}", e),
+            }
+        }
+
         let tags_json = serde_json::to_string(
             &mem.tags.clone().unwrap_or_default()
         ).unwrap_or_else(|_| "[]".to_string());
 
         state.db.save_memory(
             &companion_id,
+            Some(&conversation_id),
             &mem.content,
             mem.memory_type.as_deref().unwrap_or("personal_fact"),
             mem.source.as_deref().unwrap_or("observed"),
@@ -749,7 +895,24 @@ Output ONLY valid JSON, no markdown formatting, no explanation."#
         count += 1;
     }
 
+    eprintln!("[Memory] ✓ Saved {} memories for companion={}", count, companion_id);
     Ok(count)
+}
+
+#[tauri::command]
+async fn get_companion_memories(
+    state: State<'_, Arc<AppState>>,
+    companion_id: String,
+) -> Result<Vec<db::Memory>, String> {
+    state.db.get_companion_memories(&companion_id)
+}
+
+#[tauri::command]
+async fn delete_memory(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+) -> Result<(), String> {
+    state.db.delete_memory(id)
 }
 
 #[tauri::command]
@@ -845,19 +1008,38 @@ pub fn run() {
                             "Ensuring memory models are available...",
                         );
 
+                        let mut pull_ok = true;
+
                         if let Err(e) = pull_ollama_model(
                             &settings.api_base_url, &settings.embedding_model
                         ).await {
-                            eprintln!("[Memory] Embedding model pull: {}", e);
+                            eprintln!("[Memory] ✗ Embedding model pull failed: {}", e);
+                            let _ = app_handle.emit(
+                                "model-pull-status",
+                                format!("✗ Embedding model ({}): {}", settings.embedding_model, e),
+                            );
+                            pull_ok = false;
                         }
 
                         if let Err(e) = pull_ollama_model(
                             &settings.api_base_url, &settings.sidecar_model
                         ).await {
-                            eprintln!("[Memory] Sidecar model pull: {}", e);
+                            eprintln!("[Memory] ✗ Sidecar model pull failed: {}", e);
+                            let _ = app_handle.emit(
+                                "model-pull-status",
+                                format!("✗ Sidecar model ({}): {}", settings.sidecar_model, e),
+                            );
+                            pull_ok = false;
                         }
 
-                        let _ = app_handle.emit("model-pull-status", "Memory models ready");
+                        if pull_ok {
+                            let _ = app_handle.emit("model-pull-status", "Memory models ready");
+                        } else {
+                            let _ = app_handle.emit(
+                                "model-pull-status",
+                                "⚠ Some memory models failed to pull — check Ollama",
+                            );
+                        }
                     }
                 }
             });
@@ -890,6 +1072,8 @@ pub fn run() {
             check_summary_needed,
             generate_summary,
             extract_memories,
+            get_companion_memories,
+            delete_memory,
             check_backend_status,
         ])
         .run(tauri::generate_context!())

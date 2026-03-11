@@ -142,6 +142,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 companion_id TEXT NOT NULL,
+                conversation_id TEXT,
                 memory_type TEXT NOT NULL,
                 content TEXT NOT NULL,
                 source TEXT NOT NULL DEFAULT 'observed',
@@ -259,6 +260,23 @@ impl Database {
             ",
         )
         .map_err(|e| format!("Failed to create indexes: {}", e))?;
+
+        // --- Migration: add conversation_id to memories if needed ---
+        let has_conv_id_in_memories: bool = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(memories)")
+                .map_err(|e| format!("PRAGMA error: {}", e))?;
+            let cols: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| format!("PRAGMA query error: {}", e))?
+                .filter_map(|r| r.ok())
+                .collect();
+            cols.contains(&"conversation_id".to_string())
+        };
+        if !has_conv_id_in_memories {
+            conn.execute_batch("ALTER TABLE memories ADD COLUMN conversation_id TEXT;")
+                .map_err(|e| format!("Migration: add conversation_id to memories failed: {}", e))?;
+        }
 
         Ok(())
     }
@@ -642,6 +660,7 @@ impl Database {
     pub fn save_memory(
         &self,
         companion_id: &str,
+        conversation_id: Option<&str>,
         content: &str,
         memory_type: &str,
         source: &str,
@@ -660,10 +679,11 @@ impl Database {
         });
 
         conn.execute(
-            "INSERT INTO memories (companion_id, content, memory_type, source, confidence, importance, tags, embedding)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO memories (companion_id, conversation_id, content, memory_type, source, confidence, importance, tags, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 companion_id,
+                conversation_id,
                 content,
                 memory_type,
                 source,
@@ -772,6 +792,99 @@ impl Database {
         Ok(results)
     }
 
+    /// Find the closest existing memory if its similarity to the query exceeds the given threshold.
+    /// Returns None if no memory is close enough. Used for deduplication before saving.
+    pub fn find_similar_memory(
+        &self,
+        companion_id: &str,
+        query_embedding: &[f32],
+        threshold: f32,
+    ) -> Result<Option<Memory>, String> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, companion_id, memory_type, content, source, confidence, importance,
+                        tags, source_message_id, supersedes, created_at, last_confirmed,
+                        retrieval_count, last_accessed, embedding
+                 FROM memories
+                 WHERE companion_id = ?1 AND embedding IS NOT NULL",
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        let query_norm: f32 = query_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if query_norm == 0.0 {
+            return Ok(None);
+        }
+
+        let mut best: Option<(f32, Memory)> = None;
+
+        let rows: Vec<(Memory, Vec<f32>)> = stmt
+            .query_map(params![companion_id], |row| {
+                let embedding_blob: Vec<u8> = row.get(14)?;
+                let embedding: Vec<f32> = embedding_blob
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                Ok((
+                    Memory {
+                        id: row.get(0)?,
+                        companion_id: row.get(1)?,
+                        memory_type: row.get(2)?,
+                        content: row.get(3)?,
+                        source: row.get(4)?,
+                        confidence: row.get(5)?,
+                        importance: row.get(6)?,
+                        tags: row.get(7)?,
+                        source_message_id: row.get(8)?,
+                        supersedes: row.get(9)?,
+                        created_at: row.get(10)?,
+                        last_confirmed: row.get(11)?,
+                        retrieval_count: row.get(12)?,
+                        last_accessed: row.get(13)?,
+                    },
+                    embedding,
+                ))
+            })
+            .map_err(|e| format!("Query error: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (memory, emb) in rows {
+            let emb_norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if emb_norm == 0.0 { continue; }
+            let dot: f32 = query_embedding.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
+            let similarity = dot / (query_norm * emb_norm);
+            if similarity >= threshold {
+                if best.as_ref().map_or(true, |(s, _)| similarity > *s) {
+                    best = Some((similarity, memory));
+                }
+            }
+        }
+
+        Ok(best.map(|(_, m)| m))
+    }
+
+    /// Reinforce an existing memory: bump confidence up one level, update last_confirmed.
+    /// Called when a near-duplicate candidate is found instead of inserting a new row.
+    pub fn reinforce_memory(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE memories SET
+                last_confirmed = datetime('now'),
+                retrieval_count = retrieval_count + 1,
+                confidence = CASE confidence
+                    WHEN 'low' THEN 'medium'
+                    WHEN 'medium' THEN 'high'
+                    ELSE confidence
+                END
+             WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("Reinforce memory error: {}", e))?;
+        Ok(())
+    }
+
     /// Increment retrieval_count and update last_accessed for a set of memory IDs
     pub fn touch_memories(&self, ids: &[i64]) -> Result<(), String> {
         if ids.is_empty() {
@@ -799,6 +912,54 @@ impl Database {
             )
             .map_err(|e| format!("Query error: {}", e))?;
         Ok(count)
+    }
+
+    /// Get all memories for a companion, ordered by newest first
+    pub fn get_companion_memories(&self, companion_id: &str) -> Result<Vec<Memory>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, companion_id, memory_type, content, source, confidence, importance,
+                        tags, source_message_id, supersedes, created_at, last_confirmed,
+                        retrieval_count, last_accessed
+                 FROM memories
+                 WHERE companion_id = ?1
+                 ORDER BY created_at DESC",
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        let memories = stmt
+            .query_map(params![companion_id], |row| {
+                Ok(Memory {
+                    id: row.get(0)?,
+                    companion_id: row.get(1)?,
+                    memory_type: row.get(2)?,
+                    content: row.get(3)?,
+                    source: row.get(4)?,
+                    confidence: row.get(5)?,
+                    importance: row.get(6)?,
+                    tags: row.get(7)?,
+                    source_message_id: row.get(8)?,
+                    supersedes: row.get(9)?,
+                    created_at: row.get(10)?,
+                    last_confirmed: row.get(11)?,
+                    retrieval_count: row.get(12)?,
+                    last_accessed: row.get(13)?,
+                })
+            })
+            .map_err(|e| format!("Query error: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(memories)
+    }
+
+    /// Delete a memory by ID
+    pub fn delete_memory(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM memories WHERE id = ?1", params![id])
+            .map_err(|e| format!("Delete memory error: {}", e))?;
+        Ok(())
     }
 
     /// Get the last N messages from a conversation (for memory extraction).
@@ -899,7 +1060,7 @@ impl Database {
                 .unwrap_or(true),
             sidecar_model: self
                 .get_setting("sidecar_model")?
-                .unwrap_or_else(|| "smollm3:3b".to_string()),
+                .unwrap_or_else(|| "gemma2:2b".to_string()),
             embedding_model: self
                 .get_setting("embedding_model")?
                 .unwrap_or_else(|| "all-minilm".to_string()),

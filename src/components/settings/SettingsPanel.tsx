@@ -17,7 +17,7 @@ export function SettingsPanel() {
     context_window_size: 4096,
     context_messages_limit: 50,
     memory_enabled: true,
-    sidecar_model: "smollm3:3b",
+    sidecar_model: "gemma2:2b",
     embedding_model: "all-minilm",
   });
   const [saving, setSaving] = useState(false);
@@ -92,11 +92,10 @@ export function SettingsPanel() {
                       default_model: preset.model,
                     }))
                   }
-                  className={`px-3 py-1.5 rounded-lg text-xs transition-all ${
-                    form.api_base_url === preset.url
+                  className={`px-3 py-1.5 rounded-lg text-xs transition-all ${form.api_base_url === preset.url
                       ? "bg-heartline/20 text-heartline border border-heartline/50"
                       : "glass glass-hover text-text-secondary"
-                  }`}
+                    }`}
                 >
                   {preset.label}
                 </button>
@@ -228,11 +227,10 @@ export function SettingsPanel() {
                     onClick={() =>
                       setForm((f) => ({ ...f, context_window_size: size }))
                     }
-                    className={`px-2.5 py-1 rounded-lg text-xs transition-all ${
-                      form.context_window_size === size
+                    className={`px-2.5 py-1 rounded-lg text-xs transition-all ${form.context_window_size === size
                         ? "bg-heartline/20 text-heartline border border-heartline/50"
                         : "glass glass-hover text-text-secondary"
-                    }`}
+                      }`}
                   >
                     {size >= 1024 ? `${size / 1024}k` : size}
                   </button>
@@ -288,16 +286,14 @@ export function SettingsPanel() {
                 onClick={() =>
                   setForm((f) => ({ ...f, memory_enabled: !f.memory_enabled }))
                 }
-                className={`w-10 h-5 rounded-full transition-all relative ${
-                  form.memory_enabled
+                className={`w-10 h-5 rounded-full transition-all relative ${form.memory_enabled
                     ? "bg-heartline/60"
                     : "bg-surface-border"
-                }`}
+                  }`}
               >
                 <div
-                  className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
-                    form.memory_enabled ? "left-5" : "left-0.5"
-                  }`}
+                  className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${form.memory_enabled ? "left-5" : "left-0.5"
+                    }`}
                 />
               </button>
             </div>
@@ -314,7 +310,7 @@ export function SettingsPanel() {
                   setForm((f) => ({ ...f, sidecar_model: e.target.value }))
                 }
                 className="w-full bg-space-700/50 border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
-                placeholder="smollm3:3b"
+                placeholder="gemma2:2b"
               />
               <p className="text-xs text-text-muted mt-1">
                 Small model for fact extraction. Runs via the same API endpoint.
