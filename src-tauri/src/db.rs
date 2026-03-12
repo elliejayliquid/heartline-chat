@@ -99,6 +99,8 @@ pub struct AppSettings {
     pub memory_enabled: bool,
     pub sidecar_model: String,
     pub embedding_model: String,
+    // Speech-to-Text
+    pub stt_model: String,
 }
 
 impl Database {
@@ -204,6 +206,22 @@ impl Database {
             ",
         )
         .map_err(|e| format!("Failed to initialize tables: {}", e))?;
+
+        // --- Migration: add stt_model to settings if missing ---
+        let has_stt_model: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key = 'stt_model'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        if has_stt_model == 0 {
+            let _ = conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('stt_model', 'base.en')",
+                [],
+            );
+        }
 
         // --- Migration: add conversation_id to messages if needed ---
         // Check if conversation_id column already exists
@@ -1305,6 +1323,9 @@ impl Database {
             embedding_model: self
                 .get_setting("embedding_model")?
                 .unwrap_or_else(|| "all-minilm".to_string()),
+            stt_model: self
+                .get_setting("stt_model")?
+                .unwrap_or_else(|| "base.en".to_string()),
         })
     }
 
@@ -1319,6 +1340,7 @@ impl Database {
         self.set_setting("memory_enabled", &settings.memory_enabled.to_string())?;
         self.set_setting("sidecar_model", &settings.sidecar_model)?;
         self.set_setting("embedding_model", &settings.embedding_model)?;
+        self.set_setting("stt_model", &settings.stt_model)?;
         Ok(())
     }
 }

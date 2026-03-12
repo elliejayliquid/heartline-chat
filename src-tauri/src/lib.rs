@@ -1,6 +1,7 @@
 mod db;
 mod events;
 mod inference;
+mod whisper;
 
 use db::{AppSettings, CompanionProfile, Conversation, Database, JournalEntry, StoredMessage};
 use events::{AppEvent, EventBus};
@@ -16,6 +17,7 @@ pub struct AppState {
     pub db: Database,
     pub inference: InferenceManager,
     pub events: EventBus,
+    pub whisper: whisper::WhisperEngine,
 }
 
 // ============================================================
@@ -1299,6 +1301,37 @@ async fn check_backend_status(
 }
 
 // ============================================================
+// Whisper STT
+// ============================================================
+
+#[tauri::command]
+async fn init_whisper(
+    state: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    let settings = state.db.get_settings()?;
+    state.whisper.ensure_ready(&settings.stt_model).await?;
+    Ok(true)
+}
+
+#[tauri::command]
+async fn transcribe_audio(
+    state: State<'_, Arc<AppState>>,
+    audio_data: Vec<u8>,
+) -> Result<String, String> {
+    eprintln!("[Whisper] Received {} bytes of audio", audio_data.len());
+    let settings = state.db.get_settings()?;
+
+    // Ensure binary + model are downloaded (lazy init on first use)
+    if !state.whisper.is_ready(&settings.stt_model) {
+        state.whisper.ensure_ready(&settings.stt_model).await?;
+    }
+
+    // Transcribe the WAV data
+    let text = state.whisper.transcribe_wav(&audio_data, &settings.stt_model)?;
+    Ok(text)
+}
+
+// ============================================================
 // App Setup
 // ============================================================
 
@@ -1322,11 +1355,13 @@ pub fn run() {
                 .expect("Failed to initialize database");
             let inference = InferenceManager::new();
             let events = EventBus::new();
+            let whisper_engine = whisper::WhisperEngine::new(&app_data_dir);
 
             let state = Arc::new(AppState {
                 db,
                 inference,
                 events,
+                whisper: whisper_engine,
             });
 
             // Auto-start Ollama if settings point to it
@@ -1438,6 +1473,8 @@ pub fn run() {
             delete_journal_entry,
             resolve_journal_entry,
             check_backend_status,
+            init_whisper,
+            transcribe_audio,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Heartline");

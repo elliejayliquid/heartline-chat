@@ -19,6 +19,7 @@ export function SettingsPanel() {
     memory_enabled: true,
     sidecar_model: "gemma2:2b",
     embedding_model: "all-minilm",
+    stt_model: "base.en",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -93,8 +94,8 @@ export function SettingsPanel() {
                     }))
                   }
                   className={`px-3 py-1.5 rounded-lg text-xs transition-all ${form.api_base_url === preset.url
-                      ? "bg-heartline/20 text-heartline border border-heartline/50"
-                      : "glass glass-hover text-text-secondary"
+                    ? "bg-heartline/20 text-heartline border border-heartline/50"
+                    : "glass glass-hover text-text-secondary"
                     }`}
                 >
                   {preset.label}
@@ -228,8 +229,8 @@ export function SettingsPanel() {
                       setForm((f) => ({ ...f, context_window_size: size }))
                     }
                     className={`px-2.5 py-1 rounded-lg text-xs transition-all ${form.context_window_size === size
-                        ? "bg-heartline/20 text-heartline border border-heartline/50"
-                        : "glass glass-hover text-text-secondary"
+                      ? "bg-heartline/20 text-heartline border border-heartline/50"
+                      : "glass glass-hover text-text-secondary"
                       }`}
                   >
                     {size >= 1024 ? `${size / 1024}k` : size}
@@ -287,8 +288,8 @@ export function SettingsPanel() {
                   setForm((f) => ({ ...f, memory_enabled: !f.memory_enabled }))
                 }
                 className={`w-10 h-5 rounded-full transition-all relative ${form.memory_enabled
-                    ? "bg-heartline/60"
-                    : "bg-surface-border"
+                  ? "bg-heartline/60"
+                  : "bg-surface-border"
                   }`}
               >
                 <div
@@ -334,6 +335,46 @@ export function SettingsPanel() {
               <p className="text-xs text-text-muted mt-1">
                 Model for semantic search (~90MB). Uses /v1/embeddings endpoint.
               </p>
+            </div>
+
+            {/* ── Speech-to-Text ── */}
+            <div className="border-t border-surface-border pt-5">
+              <label className="block text-xs text-text-secondary mb-3 uppercase tracking-wider">
+                Speech-to-Text
+              </label>
+
+              <div className="mb-4">
+                <label className="block text-xs text-text-secondary mb-1.5 uppercase tracking-wider">
+                  Whisper Model
+                </label>
+                <div className="flex flex-col gap-2">
+                  <button
+                    onClick={() => setForm(f => ({ ...f, stt_model: "base.en" }))}
+                    className={`flex flex-col items-start px-4 py-3 rounded-lg text-sm transition-all text-left ${form.stt_model === "base.en"
+                        ? "bg-heartline/20 border border-heartline/50"
+                        : "glass glass-hover border border-transparent"
+                      }`}
+                  >
+                    <span className={form.stt_model === "base.en" ? "text-heartline font-medium" : "text-text-primary"}>
+                      English Only (base.en)
+                    </span>
+                    <span className="text-xs text-text-muted mt-1">Faster and slightly more accurate for English.</span>
+                  </button>
+
+                  <button
+                    onClick={() => setForm(f => ({ ...f, stt_model: "base" }))}
+                    className={`flex flex-col items-start px-4 py-3 rounded-lg text-sm transition-all text-left ${form.stt_model === "base"
+                        ? "bg-heartline/20 border border-heartline/50"
+                        : "glass glass-hover border border-transparent"
+                      }`}
+                  >
+                    <span className={form.stt_model === "base" ? "text-heartline font-medium" : "text-text-primary"}>
+                      Multilingual (base)
+                    </span>
+                    <span className="text-xs text-text-muted mt-1">Supports English + over 90 other languages.</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 

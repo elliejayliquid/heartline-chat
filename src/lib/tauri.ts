@@ -17,6 +17,8 @@ export interface AppSettings {
   memory_enabled: boolean;
   sidecar_model: string;
   embedding_model: string;
+  // Speech-to-Text
+  stt_model: string;
 }
 
 export interface CompanionProfile {
@@ -160,6 +162,11 @@ export const api = {
     invoke<void>("delete_journal_entry", { id }),
   resolveJournalEntry: (id: number) =>
     invoke<void>("resolve_journal_entry", { id }),
+
+  // Whisper STT
+  initWhisper: () => invoke<boolean>("init_whisper"),
+  transcribeAudio: (audioData: number[]) =>
+    invoke<string>("transcribe_audio", { audioData }),
 };
 
 // --- Event listeners ---
