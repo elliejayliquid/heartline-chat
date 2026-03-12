@@ -212,7 +212,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   console.warn("[Summary] Check failed:", err);
                 });
 
-              // Memory extraction — debounced so rapid exchanges only trigger once
+              // Memory + journal extraction — debounced so rapid exchanges only trigger once
               if (activeCompanionId) {
                 const convId = activeConversationId;
                 const compId = activeCompanionId;
@@ -220,23 +220,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 memoryExtractionTimer = setTimeout(() => {
                   memoryExtractionTimer = null;
                   console.log(
-                    `[Memory] Triggering memory extraction for conversation=${convId}, companion=${compId}`
+                    `[Memory] Triggering extraction for conversation=${convId}, companion=${compId}`
                   );
                   api
                     .extractMemories(convId, compId)
                     .then((count) => {
                       if (count > 0) {
-                        console.log(
-                          `[Memory] ✓ Extracted ${count} memories from this exchange.`
-                        );
+                        console.log(`[Memory] ✓ Extracted ${count} memories.`);
                       } else {
-                        console.log(
-                          "[Memory] Nothing notable extracted (0 memories)."
-                        );
+                        console.log("[Memory] Nothing notable (0 memories).");
                       }
                     })
                     .catch((err) => {
                       console.error("[Memory] ✗ Extraction failed:", err);
+                    });
+                  api
+                    .extractJournal(convId, compId)
+                    .then((count) => {
+                      if (count > 0) {
+                        console.log(`[Journal] ✓ Saved ${count} journal entries.`);
+                      } else {
+                        console.log("[Journal] Nothing notable (0 entries).");
+                      }
+                    })
+                    .catch((err) => {
+                      console.error("[Journal] ✗ Extraction failed:", err);
                     });
                 }, 4000); // 4s debounce — waits for burst typing to settle
               }

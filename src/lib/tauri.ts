@@ -74,6 +74,21 @@ export interface Memory {
   last_accessed: string | null;
 }
 
+export interface JournalEntry {
+  id: number;
+  companion_id: string;
+  entry_type: string;  // observation, hypothesis, self_state, open_question, intention
+  content: string;
+  why_it_mattered: string;
+  emotional_tone: string | null;
+  confidence: string;
+  stability: string;
+  tags: string;        // JSON array
+  source_excerpt: string | null;
+  resolved_at: string | null;
+  created_at: string;
+}
+
 // --- API calls to Rust backend ---
 
 export const api = {
@@ -135,6 +150,16 @@ export const api = {
     invoke<number>("add_manual_memory", { companionId, content, memoryType, tags: tags ?? null, createdAt: createdAt ?? null }),
   updateMemory: (id: number, content: string, memoryType: string, tags?: string) =>
     invoke<void>("update_memory", { id, content, memoryType, tags: tags ?? null }),
+
+  // Journal
+  extractJournal: (conversationId: string, companionId: string) =>
+    invoke<number>("extract_journal", { conversationId, companionId }),
+  getJournalEntries: (companionId: string) =>
+    invoke<JournalEntry[]>("get_journal_entries", { companionId }),
+  deleteJournalEntry: (id: number) =>
+    invoke<void>("delete_journal_entry", { id }),
+  resolveJournalEntry: (id: number) =>
+    invoke<void>("resolve_journal_entry", { id }),
 };
 
 // --- Event listeners ---

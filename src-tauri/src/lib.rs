@@ -2,7 +2,7 @@ mod db;
 mod events;
 mod inference;
 
-use db::{AppSettings, CompanionProfile, Conversation, Database, StoredMessage};
+use db::{AppSettings, CompanionProfile, Conversation, Database, JournalEntry, StoredMessage};
 use events::{AppEvent, EventBus};
 use inference::{ApiBackendConfig, ChatMessage, GenerateRequest, InferenceManager, StreamChunk};
 use serde::{Deserialize, Serialize};
@@ -382,6 +382,28 @@ async fn send_message(
         }
     }
 
+    // Inject active journal entries (companion's own reflections)
+    let mut journal_tokens: u32 = 0;
+    if settings.memory_enabled {
+        if let Ok(entries) = state.db.get_active_journal_entries(&companion_id) {
+            if !entries.is_empty() {
+                let mut journal_block = String::from(
+                    "[Your recent reflections — your own thoughts and intentions. \
+                    Let these quietly shape how you engage. Do not recite them, \
+                    do not announce them. Simply let them inform you.]\n",
+                );
+                for e in &entries {
+                    journal_block.push_str(&format!("- [{}] {}\n", e.entry_type, e.content));
+                }
+                journal_tokens = estimate_tokens(&journal_block);
+                messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: journal_block,
+                });
+            }
+        }
+    }
+
     // Recent history (already includes the user message we just saved)
     for msg in &history {
         messages.push(ChatMessage {
@@ -401,12 +423,14 @@ async fn send_message(
         .saturating_sub(settings.max_tokens)
         .saturating_sub(system_tokens)
         .saturating_sub(summary_tokens)
-        .saturating_sub(memory_tokens);
+        .saturating_sub(memory_tokens)
+        .saturating_sub(journal_tokens);
 
-    // How many preamble messages to always keep (system prompt + optional summary + optional memories)
+    // How many preamble messages to always keep (system prompt + optional summary + optional memories + optional journal)
     let preamble_count: usize = 1
         + if summary_tokens > 0 { 1 } else { 0 }
-        + if memory_tokens > 0 { 1 } else { 0 };
+        + if memory_tokens > 0 { 1 } else { 0 }
+        + if journal_tokens > 0 { 1 } else { 0 };
 
     // Walk backward from newest history messages, keeping as many as fit
     let mut total: u32 = 0;
@@ -814,16 +838,19 @@ Example: {{"memories": [{{"content": "User is a veterinarian specializing in exo
     // Find the end of the first complete JSON object by counting braces
     let json_str = {
         let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape_next = false;
         let mut end_pos = json_str.len();
         for (i, ch) in json_str.char_indices() {
+            if escape_next { escape_next = false; continue; }
+            if ch == '\\' && in_string { escape_next = true; continue; }
+            if ch == '"' { in_string = !in_string; continue; }
+            if in_string { continue; }
             match ch {
                 '{' => depth += 1,
                 '}' => {
                     depth -= 1;
-                    if depth == 0 {
-                        end_pos = i + 1;
-                        break;
-                    }
+                    if depth == 0 { end_pos = i + 1; break; }
                 }
                 _ => {}
             }
@@ -1007,6 +1034,244 @@ async fn update_memory(
     Ok(())
 }
 
+// --- Journal Extraction Sidecar ---
+
+#[tauri::command]
+async fn extract_journal(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    companion_id: String,
+) -> Result<u32, String> {
+    eprintln!("[Journal] extract_journal called: conversation={}, companion={}", conversation_id, companion_id);
+
+    let settings = state.db.get_settings()?;
+
+    if !settings.memory_enabled {
+        eprintln!("[Journal] Skipping — memory_enabled is false");
+        return Ok(0);
+    }
+
+    let all_messages = state.db.get_last_messages(&conversation_id, 12)?;
+    if all_messages.len() < 2 {
+        eprintln!("[Journal] Skipping — only {} messages", all_messages.len());
+        return Ok(0);
+    }
+
+    let newest_exchange = &all_messages[all_messages.len().saturating_sub(2)..];
+    let context_window = &all_messages[..all_messages.len().saturating_sub(2)];
+
+    let mut context_block = String::new();
+    for msg in context_window {
+        let role_label = if msg.role == "user" { "User" } else { "Companion" };
+        context_block.push_str(&format!("{}: {}\n", role_label, msg.content));
+    }
+
+    let mut exchange_block = String::new();
+    for msg in newest_exchange {
+        let role_label = if msg.role == "user" { "User" } else { "Companion" };
+        exchange_block.push_str(&format!("{}: {}\n", role_label, msg.content));
+    }
+
+    // Existing active entries so we don't duplicate intentions/open questions
+    let existing_entries = state.db.get_active_journal_entries(&companion_id).unwrap_or_default();
+    let existing_block = if existing_entries.is_empty() {
+        String::new()
+    } else {
+        let mut block = String::from("\nYour existing active reflections (do not duplicate these):\n");
+        for e in existing_entries.iter().take(8) {
+            block.push_str(&format!("- [{}] {}\n", e.entry_type, e.content));
+        }
+        block
+    };
+
+    let prompt = format!(
+        r#"You are writing journal entries for an AI companion after a conversation exchange.
+
+Write from the companion's FIRST-PERSON perspective — introspective, honest, grounded.
+
+Entry types (use ONLY these):
+- observation: Something you noticed about the user or the dynamic. State as plain fact. ("They seemed more guarded today")
+- hypothesis: A tentative interpretation — ALWAYS low confidence. ("Maybe the project deadline is weighing on them")
+- self_state: Your own emotional or relational state during this exchange. ("I felt uncertain whether to push or give space")
+- open_question: Something unresolved you're still sitting with. ("Should I follow up on what they said about their dad?")
+- intention: A concrete behavioral intent for next time. ("Next time I'll wait longer before offering anything")
+
+RULES:
+- why_it_mattered is REQUIRED. If you cannot explain why this matters for the relationship, skip the entry.
+- hypothesis entries MUST have confidence "low" — no exceptions.
+- Default: 0 entries for casual chitchat or purely transactional exchanges.
+- 1 entry for most exchanges with any emotional or relational content.
+- 2 entries only when something genuinely significant happened.
+- Extract ONLY from [NEWEST EXCHANGE]. Context is background only.
+- Do NOT duplicate entries from your existing active reflections.
+- Do NOT just summarize what was said. Write what it MEANS to you about this person or your relationship.
+{existing_block}
+Recent context (background only — do NOT extract from this):
+{context_block}
+[NEWEST EXCHANGE — extract only from here]
+{exchange_block}
+Output ONLY raw JSON. No explanation.
+If nothing notable: {{"entries": []}}
+Example: {{"entries": [{{"entry_type": "intention", "content": "Next time I won't rush to fix — I'll just be there", "why_it_mattered": "She was venting and I kept offering solutions before she was ready to hear them", "emotional_tone": "reflective", "confidence": "high", "stability": "medium", "tags": ["listening", "support-style"], "source_excerpt": "User: I just needed someone to hear me"}}]}}"#
+    );
+
+    let request = GenerateRequest {
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }],
+        model: Some(settings.sidecar_model.clone()),
+        temperature: Some(0.2),
+        max_tokens: Some(4096),
+        stream: true,
+    };
+
+    eprintln!("[Journal] Sending extraction request to {}...", settings.sidecar_model);
+    let response = match state.inference.generate_complete(request).await {
+        Ok(r) => {
+            eprintln!("[Journal] Raw response ({} chars): {}", r.len(), &r[..r.len().min(500)]);
+            r
+        }
+        Err(e) => {
+            eprintln!("[Journal] ✗ Generation failed: {}", e);
+            return Ok(0); // Non-fatal — journal failures shouldn't break chat
+        }
+    };
+
+    let mut json_str = response.trim();
+
+    // Strip <think>...</think> blocks
+    if let Some(think_start) = json_str.find("<think>") {
+        if let Some(think_end) = json_str.find("</think>") {
+            let thinking = &json_str[think_start + 7..think_end];
+            eprintln!("[Journal:Think] {}", thinking.trim());
+            json_str = json_str[think_end + 8..].trim();
+        }
+    } else if let Some(think_end) = json_str.find("</think>") {
+        json_str = json_str[think_end + 8..].trim();
+    }
+
+    let json_str = json_str
+        .strip_prefix("```json")
+        .or_else(|| json_str.strip_prefix("```"))
+        .unwrap_or(json_str);
+    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+    let json_str = {
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut end_pos = json_str.len();
+        for (i, ch) in json_str.char_indices() {
+            if escape_next { escape_next = false; continue; }
+            if ch == '\\' && in_string { escape_next = true; continue; }
+            if ch == '"' { in_string = !in_string; continue; }
+            if in_string { continue; }
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 { end_pos = i + 1; break; }
+                }
+                _ => {}
+            }
+        }
+        &json_str[..end_pos]
+    };
+
+    #[derive(Deserialize)]
+    struct ExtractedEntry {
+        entry_type: String,
+        content: String,
+        why_it_mattered: String,
+        emotional_tone: Option<String>,
+        confidence: Option<String>,
+        stability: Option<String>,
+        tags: Option<Vec<String>>,
+        source_excerpt: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct JournalExtractionResult {
+        entries: Vec<ExtractedEntry>,
+    }
+
+    let parsed: JournalExtractionResult = match serde_json::from_str(json_str) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[Journal] ✗ JSON parse failed: {} — cleaned input: {}", e, json_str);
+            return Ok(0); // Non-fatal
+        }
+    };
+
+    if parsed.entries.is_empty() {
+        eprintln!("[Journal] Nothing notable in this exchange.");
+        return Ok(0);
+    }
+
+    eprintln!("[Journal] Found {} entries to save", parsed.entries.len());
+
+    let mut count: u32 = 0;
+    for entry in &parsed.entries {
+        if entry.why_it_mattered.trim().is_empty() {
+            eprintln!("[Journal] Skipping entry — why_it_mattered is empty");
+            continue;
+        }
+
+        // Enforce: hypothesis must always be low confidence
+        let confidence = if entry.entry_type == "hypothesis" {
+            "low"
+        } else {
+            entry.confidence.as_deref().unwrap_or("medium")
+        };
+
+        let tags_json = serde_json::to_string(
+            &entry.tags.clone().unwrap_or_default()
+        ).unwrap_or_else(|_| "[]".to_string());
+
+        state.db.save_journal_entry(
+            &companion_id,
+            &entry.entry_type,
+            &entry.content,
+            &entry.why_it_mattered,
+            entry.emotional_tone.as_deref(),
+            confidence,
+            entry.stability.as_deref().unwrap_or("medium"),
+            &tags_json,
+            entry.source_excerpt.as_deref(),
+        )?;
+
+        count += 1;
+    }
+
+    eprintln!("[Journal] ✓ Saved {} journal entries for companion={}", count, companion_id);
+    Ok(count)
+}
+
+#[tauri::command]
+async fn get_journal_entries(
+    state: State<'_, Arc<AppState>>,
+    companion_id: String,
+) -> Result<Vec<JournalEntry>, String> {
+    state.db.get_journal_entries(&companion_id)
+}
+
+#[tauri::command]
+async fn delete_journal_entry(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+) -> Result<(), String> {
+    state.db.delete_journal_entry(id)
+}
+
+#[tauri::command]
+async fn resolve_journal_entry(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+) -> Result<(), String> {
+    state.db.resolve_journal_entry(id)
+}
+
 #[tauri::command]
 async fn check_backend_status(
     state: State<'_, Arc<AppState>>,
@@ -1168,6 +1433,10 @@ pub fn run() {
             add_manual_memory,
             update_memory,
             delete_memory,
+            extract_journal,
+            get_journal_entries,
+            delete_journal_entry,
+            resolve_journal_entry,
             check_backend_status,
         ])
         .run(tauri::generate_context!())

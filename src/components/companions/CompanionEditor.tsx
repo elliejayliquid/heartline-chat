@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useChatStore } from "@/stores/chatStore";
-import { api, type CompanionProfile, type Memory } from "@/lib/tauri";
+import { api, type CompanionProfile, type Memory, type JournalEntry } from "@/lib/tauri";
 
 export function CompanionEditor() {
   const isOpen = useChatStore((s) => s.companionEditorOpen);
@@ -21,13 +21,19 @@ export function CompanionEditor() {
   // Memory state
   const [memories, setMemories] = useState<Memory[]>([]);
   const [memoriesLoading, setMemoriesLoading] = useState(false);
-  const [memoriesExpanded, setMemoriesExpanded] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editContent, setEditContent] = useState("");
   const [editType, setEditType] = useState("");
   const [editTags, setEditTags] = useState("");
   const [editSaving, setEditSaving] = useState(false);
+
+  // Journal state
+  const [journal, setJournal] = useState<JournalEntry[]>([]);
+  const [journalLoading, setJournalLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<"memories" | "journal">("memories");
+  const [deletingJournalId, setDeletingJournalId] = useState<number | null>(null);
+  const [resolvingId, setResolvingId] = useState<number | null>(null);
 
   // Manual memory input state
   const [manualContent, setManualContent] = useState("");
@@ -46,7 +52,6 @@ export function CompanionEditor() {
       });
       // Load memories for this companion
       setMemoriesLoading(true);
-      setMemoriesExpanded(false);
       setShowManualForm(false);
       setManualContent("");
       setManualTags("");
@@ -56,9 +61,16 @@ export function CompanionEditor() {
         .then((mems) => setMemories(mems))
         .catch((err) => console.error("Failed to load memories:", err))
         .finally(() => setMemoriesLoading(false));
+      setJournalLoading(true);
+      api
+        .getJournalEntries(editingCompanion.id)
+        .then((entries) => setJournal(entries))
+        .catch((err) => console.error("Failed to load journal:", err))
+        .finally(() => setJournalLoading(false));
     } else if (isOpen) {
       setForm({ name: "", personality: "" });
       setMemories([]);
+      setJournal([]);
     }
     setError(null);
   }, [isOpen, editingCompanion]);
@@ -187,6 +199,48 @@ export function CompanionEditor() {
     }
   };
 
+  const handleDeleteJournalEntry = async (id: number) => {
+    setDeletingJournalId(id);
+    try {
+      await api.deleteJournalEntry(id);
+      setJournal((prev) => prev.filter((e) => e.id !== id));
+    } catch (err) {
+      console.error("Failed to delete journal entry:", err);
+    } finally {
+      setDeletingJournalId(null);
+    }
+  };
+
+  const handleResolveEntry = async (id: number) => {
+    setResolvingId(id);
+    try {
+      await api.resolveJournalEntry(id);
+      setJournal((prev) =>
+        prev.map((e) => e.id === id ? { ...e, resolved_at: new Date().toISOString() } : e)
+      );
+    } catch (err) {
+      console.error("Failed to resolve journal entry:", err);
+    } finally {
+      setResolvingId(null);
+    }
+  };
+
+  const journalTypeColors: Record<string, string> = {
+    observation: "text-slate-300 bg-slate-500/15 border-slate-500/30",
+    hypothesis: "text-amber-400 bg-amber-500/15 border-amber-500/30",
+    self_state: "text-violet-400 bg-violet-500/15 border-violet-500/30",
+    open_question: "text-sky-400 bg-sky-500/15 border-sky-500/30",
+    intention: "text-emerald-400 bg-emerald-500/15 border-emerald-500/30",
+  };
+
+  const journalTypeLabels: Record<string, string> = {
+    observation: "Observation",
+    hypothesis: "Hypothesis",
+    self_state: "Self State",
+    open_question: "Open Question",
+    intention: "Intention",
+  };
+
   const typeColors: Record<string, string> = {
     personal_fact: "text-blue-400 bg-blue-500/15 border-blue-500/30",
     preference: "text-purple-400 bg-purple-500/15 border-purple-500/30",
@@ -273,36 +327,28 @@ export function CompanionEditor() {
             </p>
           </div>
 
-          {/* Memories Section — only when editing */}
+          {/* Memories + Journal tabs — only when editing */}
           {isEditing && (
             <div className="border-t border-surface-border pt-5">
-              <button
-                onClick={() => setMemoriesExpanded(!memoriesExpanded)}
-                className="flex items-center justify-between w-full group"
-              >
-                <div className="flex items-center gap-2">
-                  <label className="text-xs text-text-secondary uppercase tracking-wider cursor-pointer group-hover:text-text-primary transition-colors">
-                    Memories
-                  </label>
-                  <span className="text-xs text-text-muted bg-space-700/60 px-2 py-0.5 rounded-full">
-                    {memoriesLoading ? "..." : memories.length}
-                  </span>
-                </div>
-                <svg
-                  width="12"
-                  height="12"
-                  viewBox="0 0 12 12"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  className={`text-text-muted transition-transform duration-200 ${memoriesExpanded ? "rotate-180" : ""
-                    }`}
+              {/* Tab header */}
+              <div className="flex items-center gap-1 mb-3">
+                <button
+                  onClick={() => setActiveTab("memories")}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all ${activeTab === "memories" ? "bg-heartline/20 text-heartline border border-heartline/40" : "text-text-muted hover:text-text-primary"}`}
                 >
-                  <polyline points="2,4 6,8 10,4" />
-                </svg>
-              </button>
+                  Memories
+                  <span className="text-[10px] opacity-70">{memoriesLoading ? "…" : memories.length}</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab("journal")}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all ${activeTab === "journal" ? "bg-violet-500/20 text-violet-400 border border-violet-500/40" : "text-text-muted hover:text-text-primary"}`}
+                >
+                  Journal
+                  <span className="text-[10px] opacity-70">{journalLoading ? "…" : journal.length}</span>
+                </button>
+              </div>
 
-              {memoriesExpanded && (
+              {activeTab === "memories" && (
                 <div className="mt-3 space-y-2">
                   {/* Add Memory button / form */}
                   {!showManualForm ? (
@@ -521,6 +567,105 @@ export function CompanionEditor() {
                         </div>
                       )
                     )
+                  )}
+                </div>
+              )}
+
+              {activeTab === "journal" && (
+                <div className="space-y-2">
+                  {journalLoading ? (
+                    <div className="text-center py-6 text-text-muted text-sm">Loading journal...</div>
+                  ) : journal.length === 0 ? (
+                    <div className="text-center py-6 text-text-muted text-sm">
+                      No journal entries yet — start chatting ✨
+                    </div>
+                  ) : (
+                    journal.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className={`group/card relative glass rounded-lg px-4 py-3 border transition-all ${
+                          entry.resolved_at
+                            ? "border-surface-border/40 opacity-60"
+                            : "border-surface-border hover:border-surface-border/80"
+                        } ${deletingJournalId === entry.id ? "opacity-30" : ""}`}
+                      >
+                        {/* Actions */}
+                        <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover/card:opacity-100 transition-all">
+                          {!entry.resolved_at && (entry.entry_type === "open_question" || entry.entry_type === "intention") && (
+                            <button
+                              onClick={() => handleResolveEntry(entry.id)}
+                              disabled={resolvingId === entry.id}
+                              className="w-6 h-6 rounded flex items-center justify-center hover:bg-emerald-500/20 text-text-muted hover:text-emerald-400 transition-all"
+                              title="Mark as resolved"
+                            >
+                              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+                                <polyline points="1.5,5 4,7.5 8.5,2.5" />
+                              </svg>
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleDeleteJournalEntry(entry.id)}
+                            disabled={deletingJournalId === entry.id}
+                            className="w-6 h-6 rounded flex items-center justify-center hover:bg-red-500/20 text-text-muted hover:text-red-400 transition-all"
+                            title="Delete entry"
+                          >
+                            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+                              <line x1="1" y1="1" x2="9" y2="9" />
+                              <line x1="9" y1="1" x2="1" y2="9" />
+                            </svg>
+                          </button>
+                        </div>
+
+                        {/* Content */}
+                        <p className="text-sm text-text-primary pr-6 leading-relaxed">{entry.content}</p>
+
+                        {/* Why it mattered */}
+                        {entry.why_it_mattered && (
+                          <p className="text-xs text-text-muted mt-1.5 italic leading-relaxed">
+                            {entry.why_it_mattered}
+                          </p>
+                        )}
+
+                        {/* Source excerpt */}
+                        {entry.source_excerpt && (
+                          <p className="text-xs text-text-muted/70 mt-1 border-l-2 border-surface-border pl-2 italic">
+                            {entry.source_excerpt}
+                          </p>
+                        )}
+
+                        {/* Meta */}
+                        <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                          <span
+                            className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${journalTypeColors[entry.entry_type] ?? "text-text-muted bg-space-700/50 border-surface-border"}`}
+                          >
+                            {journalTypeLabels[entry.entry_type] ?? entry.entry_type}
+                          </span>
+                          <span className={`text-[10px] ${entry.confidence === "high" ? "text-green-400" : entry.confidence === "low" ? "text-red-400" : "text-yellow-400"}`}>
+                            {entry.confidence}
+                          </span>
+                          {entry.resolved_at && (
+                            <span className="text-[10px] text-emerald-500/70">resolved</span>
+                          )}
+                          {(() => {
+                            try {
+                              const tags: string[] = JSON.parse(entry.tags || "[]");
+                              return tags.length > 0 ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {tags.map((tag) => (
+                                    <span key={tag} className="text-[10px] text-text-muted bg-space-700/60 px-1.5 py-0.5 rounded">{tag}</span>
+                                  ))}
+                                </div>
+                              ) : null;
+                            } catch { return null; }
+                          })()}
+                          <span className="text-[10px] text-text-muted ml-auto">
+                            {new Date(
+                              entry.created_at.endsWith("Z") ? entry.created_at : entry.created_at + "Z"
+                            ).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                    ))
                   )}
                 </div>
               )}

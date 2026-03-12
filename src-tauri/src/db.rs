@@ -69,6 +69,22 @@ pub struct Memory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JournalEntry {
+    pub id: i64,
+    pub companion_id: String,
+    pub entry_type: String,  // observation, hypothesis, self_state, open_question, intention
+    pub content: String,
+    pub why_it_mattered: String,
+    pub emotional_tone: Option<String>,
+    pub confidence: String,  // high, medium, low
+    pub stability: String,   // high, medium, low
+    pub tags: String,        // JSON array
+    pub source_excerpt: Option<String>,
+    pub resolved_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub api_base_url: String,
     pub api_key: String,
@@ -161,6 +177,25 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_memories_companion
                 ON memories(companion_id, importance DESC);
+
+            CREATE TABLE IF NOT EXISTS companion_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                companion_id TEXT NOT NULL,
+                entry_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                why_it_mattered TEXT NOT NULL DEFAULT '',
+                emotional_tone TEXT,
+                confidence TEXT NOT NULL DEFAULT 'medium',
+                stability TEXT NOT NULL DEFAULT 'medium',
+                tags TEXT NOT NULL DEFAULT '[]',
+                source_excerpt TEXT,
+                resolved_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (companion_id) REFERENCES companions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_journal_companion
+                ON companion_journal(companion_id, created_at DESC);
 
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -1097,6 +1132,113 @@ impl Database {
 
         messages.reverse(); // Chronological order
         Ok(messages)
+    }
+
+    // --- Journal operations ---
+
+    pub fn save_journal_entry(
+        &self,
+        companion_id: &str,
+        entry_type: &str,
+        content: &str,
+        why_it_mattered: &str,
+        emotional_tone: Option<&str>,
+        confidence: &str,
+        stability: &str,
+        tags: &str,
+        source_excerpt: Option<&str>,
+    ) -> Result<i64, String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO companion_journal
+             (companion_id, entry_type, content, why_it_mattered, emotional_tone, confidence, stability, tags, source_excerpt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![companion_id, entry_type, content, why_it_mattered,
+                    emotional_tone, confidence, stability, tags, source_excerpt],
+        )
+        .map_err(|e| format!("Insert journal entry error: {}", e))?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    fn map_journal_entry(row: &rusqlite::Row) -> rusqlite::Result<JournalEntry> {
+        Ok(JournalEntry {
+            id: row.get(0)?,
+            companion_id: row.get(1)?,
+            entry_type: row.get(2)?,
+            content: row.get(3)?,
+            why_it_mattered: row.get(4)?,
+            emotional_tone: row.get(5)?,
+            confidence: row.get(6)?,
+            stability: row.get(7)?,
+            tags: row.get(8)?,
+            source_excerpt: row.get(9)?,
+            resolved_at: row.get(10)?,
+            created_at: row.get(11)?,
+        })
+    }
+
+    const JOURNAL_SELECT: &'static str =
+        "SELECT id, companion_id, entry_type, content, why_it_mattered, emotional_tone,
+                confidence, stability, tags, source_excerpt, resolved_at, created_at
+         FROM companion_journal";
+
+    /// Get all journal entries for a companion, newest first. For UI display.
+    pub fn get_journal_entries(&self, companion_id: &str) -> Result<Vec<JournalEntry>, String> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "{} WHERE companion_id = ?1 ORDER BY created_at DESC",
+            Self::JOURNAL_SELECT
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("Query error: {}", e))?;
+        let entries = stmt
+            .query_map(params![companion_id], Self::map_journal_entry)
+            .map_err(|e| format!("Query error: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(entries)
+    }
+
+    /// Get active journal entries for context injection into the talking model:
+    /// - Unresolved open_questions and intentions
+    /// - Recent self_state (last 7 days)
+    /// - Recent observations (last 3 days)
+    pub fn get_active_journal_entries(&self, companion_id: &str) -> Result<Vec<JournalEntry>, String> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "{} WHERE companion_id = ?1
+               AND (
+                 (entry_type IN ('open_question', 'intention') AND resolved_at IS NULL)
+                 OR (entry_type = 'self_state' AND created_at > datetime('now', '-7 days'))
+                 OR (entry_type = 'observation' AND created_at > datetime('now', '-3 days'))
+               )
+             ORDER BY created_at DESC LIMIT 10",
+            Self::JOURNAL_SELECT
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("Query error: {}", e))?;
+        let entries = stmt
+            .query_map(params![companion_id], Self::map_journal_entry)
+            .map_err(|e| format!("Query error: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(entries)
+    }
+
+    pub fn delete_journal_entry(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM companion_journal WHERE id = ?1", params![id])
+            .map_err(|e| format!("Delete journal entry error: {}", e))?;
+        Ok(())
+    }
+
+    /// Mark an open_question or intention as resolved.
+    pub fn resolve_journal_entry(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companion_journal SET resolved_at = datetime('now') WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("Resolve journal entry error: {}", e))?;
+        Ok(())
     }
 
     // --- Settings operations ---

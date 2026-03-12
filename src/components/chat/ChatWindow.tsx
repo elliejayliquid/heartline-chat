@@ -192,11 +192,10 @@ export function ChatWindow() {
           <button
             onClick={handleSend}
             disabled={!input.trim() || isGenerating || !backendConfigured}
-            className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center transition-all ${
-              input.trim() && !isGenerating && backendConfigured
+            className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center transition-all ${input.trim() && !isGenerating && backendConfigured
                 ? "bg-heartline/20 text-heartline border border-heartline/50 hover:bg-heartline/30 glow-border-subtle"
                 : "glass text-text-muted cursor-not-allowed"
-            }`}
+              }`}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="m5 12 14-7-4 7 4 7Z" />
@@ -208,19 +207,55 @@ export function ChatWindow() {
   );
 }
 
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  // Match ***bold italic***, **bold**, *italic* — order matters (longest first)
+  const regex = /(\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    // Push text before the match
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+
+    if (match[2]) {
+      // ***bold italic***
+      parts.push(<strong key={match.index}><em>{match[2]}</em></strong>);
+    } else if (match[3]) {
+      // **bold**
+      parts.push(<strong key={match.index}>{match[3]}</strong>);
+    } else if (match[4]) {
+      // *italic*
+      parts.push(<em key={match.index}>{match[4]}</em>);
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Push remaining text
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts;
+}
+
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user";
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-          isUser
+        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${isUser
             ? "bg-heartline/15 border border-heartline/30 text-text-primary rounded-br-md"
             : "glass border-heartline/10 text-text-primary rounded-bl-md"
-        }`}
+          }`}
       >
-        <p className="whitespace-pre-wrap break-words overflow-hidden">{message.content}</p>
+        <p className="whitespace-pre-wrap break-words overflow-hidden">
+          {isUser ? message.content : renderInlineMarkdown(message.content)}
+        </p>
         <p className={`text-[10px] mt-1 ${isUser ? "text-heartline-dim" : "text-text-muted"}`}>
           {formatTimestamp(message.timestamp)}
         </p>
