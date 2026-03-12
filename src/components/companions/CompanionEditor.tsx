@@ -26,11 +26,13 @@ export function CompanionEditor() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editContent, setEditContent] = useState("");
   const [editType, setEditType] = useState("");
+  const [editTags, setEditTags] = useState("");
   const [editSaving, setEditSaving] = useState(false);
 
   // Manual memory input state
   const [manualContent, setManualContent] = useState("");
   const [manualType, setManualType] = useState("personal_fact");
+  const [manualTags, setManualTags] = useState("");
   const [manualDate, setManualDate] = useState("");
   const [addingManual, setAddingManual] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
@@ -47,6 +49,7 @@ export function CompanionEditor() {
       setMemoriesExpanded(false);
       setShowManualForm(false);
       setManualContent("");
+      setManualTags("");
       setManualDate("");
       api
         .getCompanionMemories(editingCompanion.id)
@@ -109,17 +112,26 @@ export function CompanionEditor() {
     setEditingId(mem.id);
     setEditContent(mem.content);
     setEditType(mem.memory_type);
+    try {
+      const parsed: string[] = JSON.parse(mem.tags || "[]");
+      setEditTags(parsed.join(", "));
+    } catch {
+      setEditTags("");
+    }
   };
 
   const handleSaveEdit = async () => {
     if (!editingId || !editContent.trim()) return;
     setEditSaving(true);
+    const tagsJson = JSON.stringify(
+      editTags.split(",").map((t) => t.trim()).filter(Boolean)
+    );
     try {
-      await api.updateMemory(editingId, editContent.trim(), editType);
+      await api.updateMemory(editingId, editContent.trim(), editType, tagsJson);
       setMemories((prev) =>
         prev.map((m) =>
           m.id === editingId
-            ? { ...m, content: editContent.trim(), memory_type: editType }
+            ? { ...m, content: editContent.trim(), memory_type: editType, tags: tagsJson }
             : m
         )
       );
@@ -136,10 +148,14 @@ export function CompanionEditor() {
     setAddingManual(true);
     try {
       const dateToSend = manualDate || undefined;
+      const tagsJson = JSON.stringify(
+        manualTags.split(",").map((t) => t.trim()).filter(Boolean)
+      );
       const newId = await api.addManualMemory(
         editingCompanion.id,
         manualContent.trim(),
         manualType,
+        tagsJson,
         dateToSend,
       );
       // Add to local list immediately
@@ -151,7 +167,7 @@ export function CompanionEditor() {
         source: "user_defined",
         confidence: "high",
         importance: 8,
-        tags: "[]",
+        tags: tagsJson,
         source_message_id: null,
         supersedes: null,
         created_at: manualDate || new Date().toISOString(),
@@ -161,6 +177,7 @@ export function CompanionEditor() {
       };
       setMemories((prev) => [newMemory, ...prev]);
       setManualContent("");
+      setManualTags("");
       setManualDate("");
       setShowManualForm(false);
     } catch (err) {
@@ -173,6 +190,7 @@ export function CompanionEditor() {
   const typeColors: Record<string, string> = {
     personal_fact: "text-blue-400 bg-blue-500/15 border-blue-500/30",
     preference: "text-purple-400 bg-purple-500/15 border-purple-500/30",
+    durable_fact: "text-indigo-400 bg-indigo-500/15 border-indigo-500/30",
     moment: "text-amber-400 bg-amber-500/15 border-amber-500/30",
     relationship_shift: "text-pink-400 bg-pink-500/15 border-pink-500/30",
     identity_note: "text-emerald-400 bg-emerald-500/15 border-emerald-500/30",
@@ -182,6 +200,7 @@ export function CompanionEditor() {
   const typeLabels: Record<string, string> = {
     personal_fact: "Personal Fact",
     preference: "Preference",
+    durable_fact: "Durable Fact",
     moment: "Moment",
     relationship_shift: "Relationship",
     identity_note: "Identity Note",
@@ -307,6 +326,13 @@ export function CompanionEditor() {
                         placeholder="e.g. My name is Lena, I work in game dev, I love horror games..."
                         autoFocus
                       />
+                      <input
+                        type="text"
+                        value={manualTags}
+                        onChange={(e) => setManualTags(e.target.value)}
+                        className="w-full bg-space-700/50 border border-surface-border rounded-lg px-3 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
+                        placeholder="Tags: lena, game-dev, projects (comma-separated)"
+                      />
                       <div className="flex items-center gap-2">
                         <select
                           value={manualType}
@@ -330,6 +356,7 @@ export function CompanionEditor() {
                           onClick={() => {
                             setShowManualForm(false);
                             setManualContent("");
+                            setManualTags("");
                           }}
                           className="px-3 py-1.5 rounded-lg text-xs text-text-muted hover:text-text-primary transition-colors"
                         >
@@ -368,6 +395,13 @@ export function CompanionEditor() {
                             rows={3}
                             className="w-full bg-space-700/50 border border-surface-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-heartline/50 transition-all resize-y"
                             autoFocus
+                          />
+                          <input
+                            type="text"
+                            value={editTags}
+                            onChange={(e) => setEditTags(e.target.value)}
+                            className="w-full bg-space-700/50 border border-surface-border rounded-lg px-3 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-heartline/50 transition-all"
+                            placeholder="Tags: comma-separated"
                           />
                           <div className="flex items-center gap-2">
                             <select
@@ -460,6 +494,22 @@ export function CompanionEditor() {
                             <span className="text-[10px] text-text-muted" title={`Importance: ${mem.importance}/10`}>
                               ⚡{mem.importance}
                             </span>
+
+                            {/* Tags */}
+                            {(() => {
+                              try {
+                                const tags: string[] = JSON.parse(mem.tags || "[]");
+                                return tags.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1">
+                                    {tags.map((tag) => (
+                                      <span key={tag} className="text-[10px] text-text-muted bg-space-700/60 px-1.5 py-0.5 rounded">
+                                        {tag}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : null;
+                              } catch { return null; }
+                            })()}
 
                             {/* Date */}
                             <span className="text-[10px] text-text-muted ml-auto">

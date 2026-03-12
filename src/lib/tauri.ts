@@ -131,10 +131,10 @@ export const api = {
     invoke<Memory[]>("get_companion_memories", { companionId }),
   deleteMemory: (id: number) =>
     invoke<void>("delete_memory", { id }),
-  addManualMemory: (companionId: string, content: string, memoryType: string, createdAt?: string) =>
-    invoke<number>("add_manual_memory", { companionId, content, memoryType, createdAt: createdAt ?? null }),
-  updateMemory: (id: number, content: string, memoryType: string) =>
-    invoke<void>("update_memory", { id, content, memoryType }),
+  addManualMemory: (companionId: string, content: string, memoryType: string, tags?: string, createdAt?: string) =>
+    invoke<number>("add_manual_memory", { companionId, content, memoryType, tags: tags ?? null, createdAt: createdAt ?? null }),
+  updateMemory: (id: number, content: string, memoryType: string, tags?: string) =>
+    invoke<void>("update_memory", { id, content, memoryType, tags: tags ?? null }),
 };
 
 // --- Event listeners ---

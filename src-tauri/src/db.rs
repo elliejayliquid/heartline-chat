@@ -842,7 +842,7 @@ impl Database {
         let results: Vec<Memory> = scored
             .into_iter()
             .take(top_k)
-            .filter(|(base, _, _)| *base > 0.3) // Min threshold on base similarity (not boosted)
+            .filter(|(base, _, _)| *base > 0.2) // Min threshold on base similarity (not boosted)
             .map(|(_, _, memory)| memory)
             .collect();
 
@@ -920,6 +920,17 @@ impl Database {
         }
 
         Ok(best.map(|(_, m)| m))
+    }
+
+    /// Update only the tags of a memory — does not touch content or embedding.
+    pub fn update_memory_tags(&self, id: i64, tags: &str) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE memories SET tags = ?1 WHERE id = ?2",
+            params![tags, id],
+        )
+        .map_err(|e| format!("Update tags error: {}", e))?;
+        Ok(())
     }
 
     /// Reinforce an existing memory: bump confidence up one level, update last_confirmed.

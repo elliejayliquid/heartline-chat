@@ -754,9 +754,15 @@ Recent context (background only — do NOT extract from this):
 {context_block}
 [NEWEST EXCHANGE — extract only from here]
 {exchange_block}
+TAGS: Generate 3–6 specific, descriptive tags per memory. Tags should be concrete nouns or short phrases that describe WHO, WHAT, and CONTEXT — not just categories.
+Good tags: ["isak", "intern", "fishing-game", "game-dev", "projects"]
+Bad tags: ["work", "task"]
+Use "projects" for anything work/technical, "relationship" for emotional/relational content, "family" for family mentions, etc.
+Tags are used for retrieval — specific tags prevent memories from surfacing in unrelated contexts.
+
 Output ONLY raw JSON. Pick ONE memory_type per memory.
 If nothing notable: {{"memories": [], "nothing_notable": true}}
-Example: {{"memories": [{{"content": "User mentioned they are a veterinarian", "memory_type": "personal_fact", "source": "stated", "confidence": "high", "importance": 7, "tags": ["job"]}}], "nothing_notable": false}}"#
+Example: {{"memories": [{{"content": "User is a veterinarian specializing in exotic animals", "memory_type": "personal_fact", "source": "stated", "confidence": "high", "importance": 7, "tags": ["job", "veterinarian", "exotic-animals", "career"]}}], "nothing_notable": false}}"#
     );
 
     let request = GenerateRequest {
@@ -928,6 +934,7 @@ async fn add_manual_memory(
     companion_id: String,
     content: String,
     memory_type: String,
+    tags: Option<String>,
     created_at: Option<String>,
 ) -> Result<i64, String> {
     let settings = state.db.get_settings()?;
@@ -945,6 +952,8 @@ async fn add_manual_memory(
         eprintln!("[Memory] ⚠ Could not generate embedding for manual memory (will save without)");
     }
 
+    let tags_json = tags.unwrap_or_else(|| "[]".to_string());
+
     let id = state.db.save_memory(
         &companion_id,
         None,
@@ -953,7 +962,7 @@ async fn add_manual_memory(
         "user_defined",
         "high",
         8,
-        "[]",
+        &tags_json,
         embedding.as_deref(),
     )?;
 
@@ -971,10 +980,11 @@ async fn update_memory(
     id: i64,
     content: String,
     memory_type: String,
+    tags: Option<String>,
 ) -> Result<(), String> {
     let settings = state.db.get_settings()?;
 
-    // Regenerate embedding for updated content
+    // Regenerate embedding only for content changes
     let embedding = state
         .inference
         .embed_text(&content, Some(settings.embedding_model.clone()))
@@ -987,7 +997,14 @@ async fn update_memory(
         eprintln!("[Memory] ⚠ Could not regenerate embedding for memory #{}", id);
     }
 
-    state.db.update_memory_content(id, &content, &memory_type, embedding.as_deref())
+    state.db.update_memory_content(id, &content, &memory_type, embedding.as_deref())?;
+
+    // Update tags separately — no re-embedding needed
+    if let Some(tags_json) = tags {
+        state.db.update_memory_tags(id, &tags_json)?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
