@@ -698,12 +698,14 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Search memories by cosine similarity against a query embedding.
-    /// Loads all companion embeddings and computes similarity in Rust.
+    /// Search memories by cosine similarity with boosted scoring.
+    /// Boosts: retrieval count, importance, tag overlap, recency.
+    /// Ported from claude-semantic-memory MCP scoring system.
     pub fn search_memories_by_embedding(
         &self,
         companion_id: &str,
         query_embedding: &[f32],
+        query_text: Option<&str>,
         top_k: usize,
     ) -> Result<Vec<Memory>, String> {
         let conn = self.conn.lock().unwrap();
@@ -721,7 +723,6 @@ impl Database {
         let rows: Vec<(Memory, Vec<f32>)> = stmt
             .query_map(params![companion_id], |row| {
                 let embedding_blob: Vec<u8> = row.get(14)?;
-                // Convert bytes back to f32 vec
                 let embedding: Vec<f32> = embedding_blob
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
@@ -755,13 +756,19 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        // Compute cosine similarity for each memory
+        // Precompute query terms for tag matching
+        let query_terms: Vec<String> = query_text
+            .map(|q| q.to_lowercase().split_whitespace().map(String::from).collect())
+            .unwrap_or_default();
+
         let query_norm: f32 = query_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         if query_norm == 0.0 {
             return Ok(Vec::new());
         }
 
-        let mut scored: Vec<(f32, Memory)> = rows
+        let now = chrono::Utc::now();
+
+        let mut scored: Vec<(f32, f32, Memory)> = rows
             .into_iter()
             .filter_map(|(memory, emb)| {
                 let emb_norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -773,20 +780,70 @@ impl Database {
                     .zip(emb.iter())
                     .map(|(a, b)| a * b)
                     .sum();
-                let similarity = dot / (query_norm * emb_norm);
-                Some((similarity, memory))
+                let base_similarity = dot / (query_norm * emb_norm);
+
+                // --- Boosts (ported from MCP _search_memories_core) ---
+
+                // Retrieval count: frequently accessed memories are more relevant
+                // +0.01 per retrieval, capped at +0.05
+                let retrieval_boost = (memory.retrieval_count as f32 * 0.01).min(0.05);
+
+                // Importance: higher importance memories get a small bump
+                // +0.002 per importance point (max +0.02 for importance=10)
+                let importance_boost = memory.importance as f32 * 0.002;
+
+                // Tag overlap: if query words match memory tags, boost
+                // +0.03 if any tag matches
+                let tag_boost = if !query_terms.is_empty() {
+                    let tags_lower = memory.tags.to_lowercase();
+                    if query_terms.iter().any(|term| tags_lower.contains(term.as_str())) {
+                        0.03
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
+                // Recency: newer memories get a small boost, decaying over ~90 days
+                // +0.02 max, using exponential decay
+                let recency_boost = if let Ok(created) =
+                    chrono::NaiveDateTime::parse_from_str(&memory.created_at, "%Y-%m-%d %H:%M:%S")
+                {
+                    let days_old = (now - created.and_utc()).num_days().max(0) as f32;
+                    0.02 * (-days_old / 90.0).exp()
+                } else {
+                    0.0
+                };
+
+                let total_boost = retrieval_boost + importance_boost + tag_boost + recency_boost;
+                let final_score = base_similarity + total_boost;
+
+                Some((base_similarity, final_score, memory))
             })
             .collect();
 
-        // Sort by similarity descending
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by final score descending
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Take top_k
+        // Log top results with boost breakdown
+        for (i, (base, final_score, mem)) in scored.iter().take(top_k).enumerate() {
+            let boost = final_score - base;
+            if boost > 0.0 {
+                eprintln!(
+                    "[Search] #{}: score={:.3} (base={:.3} +{:.3} boost) \"{}\"",
+                    i + 1, final_score, base, boost,
+                    &mem.content[..mem.content.len().min(60)]
+                );
+            }
+        }
+
+        // Take top_k with minimum threshold on base similarity
         let results: Vec<Memory> = scored
             .into_iter()
             .take(top_k)
-            .filter(|(sim, _)| *sim > 0.3) // Minimum similarity threshold
-            .map(|(_, memory)| memory)
+            .filter(|(base, _, _)| *base > 0.3) // Min threshold on base similarity (not boosted)
+            .map(|(_, _, memory)| memory)
             .collect();
 
         Ok(results)
@@ -959,6 +1016,37 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM memories WHERE id = ?1", params![id])
             .map_err(|e| format!("Delete memory error: {}", e))?;
+        Ok(())
+    }
+
+    /// Override the created_at timestamp for a memory (used for imports with custom dates)
+    pub fn update_memory_created_at(&self, id: i64, created_at: &str) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE memories SET created_at = ?1 WHERE id = ?2",
+            params![created_at, id],
+        )
+        .map_err(|e| format!("Update created_at error: {}", e))?;
+        Ok(())
+    }
+
+    /// Update a memory's content, type, and embedding (for edits)
+    pub fn update_memory_content(
+        &self,
+        id: i64,
+        content: &str,
+        memory_type: &str,
+        embedding: Option<&[f32]>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        let embedding_bytes: Option<Vec<u8>> = embedding.map(|emb| {
+            emb.iter().flat_map(|f| f.to_le_bytes()).collect()
+        });
+        conn.execute(
+            "UPDATE memories SET content = ?1, memory_type = ?2, embedding = ?3 WHERE id = ?4",
+            params![content, memory_type, embedding_bytes, id],
+        )
+        .map_err(|e| format!("Update memory error: {}", e))?;
         Ok(())
     }
 

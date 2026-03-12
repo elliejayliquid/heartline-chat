@@ -354,7 +354,7 @@ async fn send_message(
         {
             if let Ok(memories) = state
                 .db
-                .search_memories_by_embedding(&companion_id, &query_embedding, 5)
+                .search_memories_by_embedding(&companion_id, &query_embedding, Some(&user_message), 5)
             {
                 if !memories.is_empty() {
                     // Touch retrieved memories (update retrieval_count)
@@ -756,7 +756,7 @@ Recent context (background only — do NOT extract from this):
 {exchange_block}
 Output ONLY raw JSON. Pick ONE memory_type per memory.
 If nothing notable: {{"memories": [], "nothing_notable": true}}
-Example: {{"memories": [{{"content": "User's name is Alex", "memory_type": "personal_fact", "source": "stated", "confidence": "high", "importance": 7, "tags": ["name"]}}], "nothing_notable": false}}"#
+Example: {{"memories": [{{"content": "User mentioned they are a veterinarian", "memory_type": "personal_fact", "source": "stated", "confidence": "high", "importance": 7, "tags": ["job"]}}], "nothing_notable": false}}"#
     );
 
     let request = GenerateRequest {
@@ -923,6 +923,74 @@ async fn delete_memory(
 }
 
 #[tauri::command]
+async fn add_manual_memory(
+    state: State<'_, Arc<AppState>>,
+    companion_id: String,
+    content: String,
+    memory_type: String,
+    created_at: Option<String>,
+) -> Result<i64, String> {
+    let settings = state.db.get_settings()?;
+
+    // Generate embedding so this memory is discoverable via semantic search
+    let embedding = state
+        .inference
+        .embed_text(&content, Some(settings.embedding_model.clone()))
+        .await
+        .ok(); // Non-fatal — save anyway even if embedding fails
+
+    if embedding.is_some() {
+        eprintln!("[Memory] ✓ Generated embedding for manual memory");
+    } else {
+        eprintln!("[Memory] ⚠ Could not generate embedding for manual memory (will save without)");
+    }
+
+    let id = state.db.save_memory(
+        &companion_id,
+        None,
+        &content,
+        &memory_type,
+        "user_defined",
+        "high",
+        8,
+        "[]",
+        embedding.as_deref(),
+    )?;
+
+    // Override created_at if the user specified a custom date
+    if let Some(date) = created_at {
+        state.db.update_memory_created_at(id, &date)?;
+    }
+
+    Ok(id)
+}
+
+#[tauri::command]
+async fn update_memory(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+    content: String,
+    memory_type: String,
+) -> Result<(), String> {
+    let settings = state.db.get_settings()?;
+
+    // Regenerate embedding for updated content
+    let embedding = state
+        .inference
+        .embed_text(&content, Some(settings.embedding_model.clone()))
+        .await
+        .ok();
+
+    if embedding.is_some() {
+        eprintln!("[Memory] ✓ Regenerated embedding for updated memory #{}", id);
+    } else {
+        eprintln!("[Memory] ⚠ Could not regenerate embedding for memory #{}", id);
+    }
+
+    state.db.update_memory_content(id, &content, &memory_type, embedding.as_deref())
+}
+
+#[tauri::command]
 async fn check_backend_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<bool, String> {
@@ -1080,6 +1148,8 @@ pub fn run() {
             generate_summary,
             extract_memories,
             get_companion_memories,
+            add_manual_memory,
+            update_memory,
             delete_memory,
             check_backend_status,
         ])
