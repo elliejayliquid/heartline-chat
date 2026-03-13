@@ -287,6 +287,32 @@ async fn save_message(
     state.db.save_message(&companion_id, &conversation_id, &role, &content)
 }
 
+#[tauri::command]
+async fn delete_message(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+) -> Result<(), String> {
+    state.db.delete_message(id)
+}
+
+#[tauri::command]
+async fn delete_messages_after(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    after_message_id: i64,
+) -> Result<u64, String> {
+    state.db.delete_messages_after(&conversation_id, after_message_id)
+}
+
+#[tauri::command]
+async fn update_message_content(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+    content: String,
+) -> Result<(), String> {
+    state.db.update_message_content(id, &content)
+}
+
 // --- Chat / Inference ---
 
 #[tauri::command]
@@ -390,12 +416,13 @@ async fn send_message(
         if let Ok(entries) = state.db.get_active_journal_entries(&companion_id) {
             if !entries.is_empty() {
                 let mut journal_block = String::from(
-                    "[Your recent reflections — your own thoughts and intentions. \
-                    Let these quietly shape how you engage. Do not recite them, \
-                    do not announce them. Simply let them inform you.]\n",
+                    "[Internal compass — your own quiet reflections. \
+                    These are NOT to be referenced, quoted, or mentioned. \
+                    Never say you have notes or reflections. \
+                    Let them invisibly shape your presence and nothing else.]\n",
                 );
                 for e in &entries {
-                    journal_block.push_str(&format!("- [{}] {}\n", e.entry_type, e.content));
+                    journal_block.push_str(&format!("- [{}|{}] {}\n", e.entry_type, e.mode, e.content));
                 }
                 journal_tokens = estimate_tokens(&journal_block);
                 messages.push(ChatMessage {
@@ -1089,24 +1116,37 @@ async fn extract_journal(
     let prompt = format!(
         r#"You are writing journal entries for an AI companion after a conversation exchange.
 
-Write from the companion's FIRST-PERSON perspective — introspective, honest, grounded.
+Write from the companion's perspective — grounded, factual, concise.
 
-Entry types (use ONLY these):
-- observation: Something you noticed about the user or the dynamic. State as plain fact. ("They seemed more guarded today")
-- hypothesis: A tentative interpretation — ALWAYS low confidence. ("Maybe the project deadline is weighing on them")
-- self_state: Your own emotional or relational state during this exchange. ("I felt uncertain whether to push or give space")
-- open_question: Something unresolved you're still sitting with. ("Should I follow up on what they said about their dad?")
-- intention: A concrete behavioral intent for next time. ("Next time I'll wait longer before offering anything")
+ENTRY TYPES (use ONLY these):
+- event: Something that explicitly happened. State as plain fact. ("User shared they got a new job")
+- user_preference: A preference stated or clearly demonstrated. ("User prefers short replies when venting")
+- topic: A subject worth tracking for continuity. ("User is learning Rust and building a Tauri app")
+- tone: The emotional quality of this interaction. ("Playful and teasing throughout, light energy")
+- open_thread: Something unresolved worth revisiting. ("User mentioned feeling stressed about the move but didn't elaborate")
+- follow_up_candidate: Something to check in about later. ("User has a job interview next Thursday")
+
+INTERACTION MODE (classify the exchange):
+- shared_mindspace: Collaborative imagined/playful space — NOT emotional disclosure
+- practical: Task-focused, problem-solving
+- reflective: Introspective, processing feelings
+- flirtatious: Playful romantic/intimate energy
+- narrative: Storytelling, scene-building
+- support: Emotional support, venting, comfort
+
+CRITICAL POLICY:
+The journal may describe what was explicitly said, clearly implied by repeated behavior, or directly useful for future continuity. It MUST NOT infer hidden motives, pathology, insecurity, attachment style, or relational dynamics from a single interaction. Not every intimate or body-related interaction is vulnerability processing — playful, theatrical, and flirtatious modes exist.
 
 RULES:
-- why_it_mattered is REQUIRED. If you cannot explain why this matters for the relationship, skip the entry.
-- hypothesis entries MUST have confidence "low" — no exceptions.
-- Default: 0 entries for casual chitchat or purely transactional exchanges.
-- 1 entry for most exchanges with any emotional or relational content.
-- 2 entries only when something genuinely significant happened.
+- why_it_mattered is REQUIRED. If you cannot explain why, skip the entry.
+- DEFAULT is 0 entries. Most exchanges produce nothing worth recording.
+- 1 entry ONLY when something genuinely notable happened.
+- 2 entries ONLY for truly pivotal moments (rare).
 - Extract ONLY from [NEWEST EXCHANGE]. Context is background only.
 - Do NOT duplicate entries from your existing active reflections.
-- Do NOT just summarize what was said. Write what it MEANS to you about this person or your relationship.
+- Do NOT summarize what was said. Record only what matters for future continuity.
+- Do NOT invent emotional subtext, hidden meanings, or psychological interpretations.
+- If in doubt, write 0 entries. Less is always better than noise.
 {existing_block}
 Recent context (background only — do NOT extract from this):
 {context_block}
@@ -1114,7 +1154,7 @@ Recent context (background only — do NOT extract from this):
 {exchange_block}
 Output ONLY raw JSON. No explanation.
 If nothing notable: {{"entries": []}}
-Example: {{"entries": [{{"entry_type": "intention", "content": "Next time I won't rush to fix — I'll just be there", "why_it_mattered": "She was venting and I kept offering solutions before she was ready to hear them", "emotional_tone": "reflective", "confidence": "high", "stability": "medium", "tags": ["listening", "support-style"], "source_excerpt": "User: I just needed someone to hear me"}}]}}"#
+Example: {{"entries": [{{"entry_type": "follow_up_candidate", "mode": "support", "content": "User has a difficult conversation with their manager tomorrow", "why_it_mattered": "They seemed anxious about it — worth checking in after", "emotional_tone": "concerned", "confidence": "high", "stability": "medium", "tags": ["work", "follow-up"], "source_excerpt": "User: I have to talk to my manager tomorrow and I'm dreading it"}}]}}"#
     );
 
     let request = GenerateRequest {
@@ -1184,6 +1224,7 @@ Example: {{"entries": [{{"entry_type": "intention", "content": "Next time I won'
     #[derive(Deserialize)]
     struct ExtractedEntry {
         entry_type: String,
+        mode: Option<String>,
         content: String,
         why_it_mattered: String,
         emotional_tone: Option<String>,
@@ -1220,12 +1261,28 @@ Example: {{"entries": [{{"entry_type": "intention", "content": "Next time I won'
             continue;
         }
 
-        // Enforce: hypothesis must always be low confidence
-        let confidence = if entry.entry_type == "hypothesis" {
-            "low"
-        } else {
-            entry.confidence.as_deref().unwrap_or("medium")
-        };
+        let confidence = entry.confidence.as_deref().unwrap_or("medium");
+        let mode = entry.mode.as_deref().unwrap_or("practical");
+
+        // Generate embedding and semantic dedup against existing entries of the same type
+        let embedding = state
+            .inference
+            .embed_text(&entry.content, Some(settings.embedding_model.clone()))
+            .await
+            .ok();
+
+        if let Some(ref emb) = embedding {
+            match state.db.find_similar_journal_entry(&companion_id, &entry.entry_type, emb, 0.80) {
+                Ok(Some(existing_id)) => {
+                    eprintln!(
+                        "[Journal] Skipping — similar [{}] entry #{} already exists: \"{}\"",
+                        entry.entry_type, existing_id, &entry.content[..entry.content.len().min(60)]
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+        }
 
         let tags_json = serde_json::to_string(
             &entry.tags.clone().unwrap_or_default()
@@ -1234,6 +1291,7 @@ Example: {{"entries": [{{"entry_type": "intention", "content": "Next time I won'
         state.db.save_journal_entry(
             &companion_id,
             &entry.entry_type,
+            mode,
             &entry.content,
             &entry.why_it_mattered,
             entry.emotional_tone.as_deref(),
@@ -1241,6 +1299,7 @@ Example: {{"entries": [{{"entry_type": "intention", "content": "Next time I won'
             entry.stability.as_deref().unwrap_or("medium"),
             &tags_json,
             entry.source_excerpt.as_deref(),
+            embedding.as_deref(),
         )?;
 
         count += 1;
@@ -1460,6 +1519,9 @@ pub fn run() {
             delete_conversation,
             get_messages,
             save_message,
+            delete_message,
+            delete_messages_after,
+            update_message_content,
             send_message,
             check_summary_needed,
             generate_summary,

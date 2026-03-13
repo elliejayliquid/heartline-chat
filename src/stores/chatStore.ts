@@ -57,6 +57,11 @@ interface ChatState {
   saveSettings: (settings: AppSettings) => Promise<void>;
   setSettingsOpen: (open: boolean) => void;
 
+  // Message management
+  deleteMessage: (messageId: string) => Promise<void>;
+  editMessage: (messageId: string, newContent: string) => Promise<void>;
+  rerollMessage: (messageId: string) => Promise<void>;
+
   // Companion CRUD
   openCompanionEditor: (companion?: CompanionProfile) => void;
   closeCompanionEditor: () => void;
@@ -163,10 +168,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           console.log(`[Models] ${status}`);
         });
 
-        unlistenChunk = await onStreamChunk((chunk) => {
+        unlistenChunk = await onStreamChunk(async (chunk) => {
           if (chunk.done) {
             const content = get().streamingContent;
             if (content) {
+              // Temporarily show the message while we reload from DB
               set((state) => ({
                 messages: [
                   ...state.messages,
@@ -180,6 +186,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 streamingContent: "",
                 isGenerating: false,
               }));
+              // Reload from DB to get real IDs for all messages (enables delete/edit/reroll)
+              const convId = get().activeConversationId;
+              if (convId) {
+                try {
+                  const stored = await api.getMessages(convId, 100);
+                  set({ messages: stored.map(storedToMessage) });
+                } catch { /* non-critical */ }
+              }
             } else {
               set({ isGenerating: false });
             }
@@ -370,6 +384,80 @@ export const useChatStore = create<ChatState>((set, get) => ({
           },
         ],
       }));
+    }
+  },
+
+  deleteMessage: async (messageId: string) => {
+    const numericId = Number(messageId);
+    if (isNaN(numericId)) return;
+    try {
+      await api.deleteMessage(numericId);
+      set((state) => ({
+        messages: state.messages.filter((m) => m.id !== messageId),
+      }));
+    } catch (err) {
+      console.error("Failed to delete message:", err);
+    }
+  },
+
+  editMessage: async (messageId: string, newContent: string) => {
+    const { activeConversationId, activeCompanionId, isGenerating } = get();
+    if (!activeConversationId || !activeCompanionId || isGenerating) return;
+    const numericId = Number(messageId);
+    if (isNaN(numericId)) return;
+    try {
+      // Update the message content in DB
+      await api.updateMessageContent(numericId, newContent);
+      // Delete all messages after this one
+      await api.deleteMessagesAfter(activeConversationId, numericId);
+      // Reload messages from DB to get clean state
+      const stored = await api.getMessages(activeConversationId, 100);
+      set({ messages: stored.map(storedToMessage) });
+    } catch (err) {
+      console.error("Failed to edit message:", err);
+    }
+  },
+
+  rerollMessage: async (messageId: string) => {
+    const { activeConversationId, activeCompanionId, isGenerating, messages } = get();
+    if (!activeConversationId || !activeCompanionId || isGenerating) return;
+    const numericId = Number(messageId);
+    if (isNaN(numericId)) return;
+    try {
+      // Find the message to reroll — must be assistant
+      const msgIndex = messages.findIndex((m) => m.id === messageId);
+      if (msgIndex < 0 || messages[msgIndex].role !== "assistant") return;
+      // Find the user message right before it
+      const userMsg = messages.slice(0, msgIndex).reverse().find((m) => m.role === "user");
+      if (!userMsg) return;
+      // Delete the assistant message from DB
+      await api.deleteMessage(numericId);
+      // Remove it from state and trigger a new generation
+      set((state) => ({
+        messages: state.messages.filter((m) => m.id !== messageId),
+        isGenerating: true,
+        streamingContent: "",
+      }));
+      // Re-send — but we don't save the user message again, just trigger inference
+      // We need to use sendMessage which saves user msg + generates
+      // Instead: delete the assistant msg, then the user msg, then re-send
+      // Actually simpler: delete assistant msg from DB, re-invoke send_message with user content
+      // But send_message saves a duplicate user msg...
+      // Better approach: delete assistant from DB, remove from state, call send_message
+      // which will save a new user message and generate. Then delete the old user msg.
+      const userNumericId = Number(userMsg.id);
+      if (!isNaN(userNumericId)) {
+        await api.deleteMessage(userNumericId);
+      }
+      set((state) => ({
+        messages: state.messages.filter((m) => m.id !== userMsg.id),
+        isGenerating: false, // Reset so sendMessage can proceed
+      }));
+      // Now re-send the user message (will save + generate)
+      await get().sendMessage(userMsg.content);
+    } catch (err) {
+      console.error("Failed to reroll message:", err);
+      set({ isGenerating: false });
     }
   },
 

@@ -79,7 +79,8 @@ export interface Memory {
 export interface JournalEntry {
   id: number;
   companion_id: string;
-  entry_type: string;  // observation, hypothesis, self_state, open_question, intention
+  entry_type: string;  // event, user_preference, topic, tone, open_thread, follow_up_candidate
+  mode: string;        // shared_mindspace, practical, reflective, flirtatious, narrative, support
   content: string;
   why_it_mattered: string;
   emotional_tone: string | null;
@@ -127,6 +128,12 @@ export const api = {
     }),
   saveMessage: (companionId: string, conversationId: string, role: string, content: string) =>
     invoke<number>("save_message", { companionId, conversationId, role, content }),
+  deleteMessage: (id: number) =>
+    invoke<void>("delete_message", { id }),
+  deleteMessagesAfter: (conversationId: string, afterMessageId: number) =>
+    invoke<number>("delete_messages_after", { conversationId, afterMessageId }),
+  updateMessageContent: (id: number, content: string) =>
+    invoke<void>("update_message_content", { id, content }),
 
   // Chat
   sendMessage: (companionId: string, conversationId: string, userMessage: string) =>

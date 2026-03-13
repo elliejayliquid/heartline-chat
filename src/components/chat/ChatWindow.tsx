@@ -391,21 +391,132 @@ function renderInlineMarkdown(text: string): React.ReactNode[] {
 
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user";
+  const isGenerating = useChatStore((s) => s.isGenerating);
+  const deleteMessage = useChatStore((s) => s.deleteMessage);
+  const editMessage = useChatStore((s) => s.editMessage);
+  const rerollMessage = useChatStore((s) => s.rerollMessage);
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState(message.content);
+  const [tapped, setTapped] = useState(false);
+  const editRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (editing && editRef.current) {
+      editRef.current.focus();
+      editRef.current.style.height = "auto";
+      editRef.current.style.height = editRef.current.scrollHeight + "px";
+    }
+  }, [editing]);
+
+  // Dismiss tapped state when clicking elsewhere
+  useEffect(() => {
+    if (!tapped) return;
+    const dismiss = (e: PointerEvent) => {
+      const el = (e.target as HTMLElement).closest("[data-msg-id]");
+      if (!el || el.getAttribute("data-msg-id") !== message.id) setTapped(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, [tapped, message.id]);
+
+  const handleEditSubmit = async () => {
+    const trimmed = editText.trim();
+    if (trimmed && trimmed !== message.content) {
+      await editMessage(message.id, trimmed);
+    }
+    setEditing(false);
+  };
+
+  const handleEditKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleEditSubmit();
+    } else if (e.key === "Escape") {
+      setEditText(message.content);
+      setEditing(false);
+    }
+  };
+
+  const showActions = !isGenerating && !editing;
+  const btnBase = "w-6 h-6 rounded-full bg-space-800/90 border border-surface-border flex items-center justify-center text-text-muted transition-all";
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${isUser
-          ? "bg-heartline/15 border border-heartline/30 text-text-primary rounded-br-md"
-          : "glass border-heartline/10 text-text-primary rounded-bl-md"
-          }`}
-      >
-        <p className="whitespace-pre-wrap break-words overflow-hidden">
-          {isUser ? message.content : renderInlineMarkdown(message.content)}
-        </p>
-        <p className={`text-[10px] mt-1 ${isUser ? "text-heartline-dim" : "text-text-muted"}`}>
-          {formatTimestamp(message.timestamp)}
-        </p>
+    <div
+      data-msg-id={message.id}
+      className={`group/msg flex ${isUser ? "justify-end" : "justify-start"}`}
+      onClick={() => { if (!editing) setTapped((t) => !t); }}
+    >
+      <div className="relative max-w-[80%]">
+        <div
+          className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${isUser
+            ? "bg-heartline/15 border border-heartline/30 text-text-primary rounded-br-md"
+            : "glass border-heartline/10 text-text-primary rounded-bl-md"
+            }`}
+        >
+          {editing ? (
+            <textarea
+              ref={editRef}
+              value={editText}
+              onChange={(e) => {
+                setEditText(e.target.value);
+                e.target.style.height = "auto";
+                e.target.style.height = e.target.scrollHeight + "px";
+              }}
+              onKeyDown={handleEditKeyDown}
+              onBlur={() => { setEditText(message.content); setEditing(false); }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full bg-transparent text-sm text-text-primary resize-none outline-none min-h-[1.5em]"
+            />
+          ) : (
+            <p className="whitespace-pre-wrap break-words overflow-hidden">
+              {isUser ? message.content : renderInlineMarkdown(message.content)}
+            </p>
+          )}
+          {/* Timestamp + inline action buttons */}
+          <div className="flex items-center gap-1.5 mt-1">
+            <span className={`text-[10px] ${isUser ? "text-heartline-dim" : "text-text-muted"}`}>
+              {formatTimestamp(message.timestamp)}
+            </span>
+            {showActions && (
+              <div className={`flex gap-0.5 ml-auto ${tapped ? "opacity-100" : "opacity-0 group-hover/msg:opacity-100"} transition-opacity`}>
+                {isUser && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setEditText(message.content); setEditing(true); setTapped(false); }}
+                    className={`${btnBase} hover:border-heartline/40 hover:text-heartline`}
+                    title="Edit message"
+                  >
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
+                      <path d="M7.5 1.5l1 1-5.5 5.5-1.5.5.5-1.5z" />
+                    </svg>
+                  </button>
+                )}
+                {!isUser && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); rerollMessage(message.id); }}
+                    className={`${btnBase} hover:border-heartline/40 hover:text-heartline`}
+                    title="Regenerate response"
+                  >
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
+                      <path d="M1.5 5a3.5 3.5 0 0 1 6.3-2M8.5 5a3.5 3.5 0 0 1-6.3 2" />
+                      <polyline points="7,1 8,3 6,3.5" />
+                      <polyline points="3,9 2,7 4,6.5" />
+                    </svg>
+                  </button>
+                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); deleteMessage(message.id); }}
+                  className={`${btnBase} hover:border-red-500/40 hover:text-red-400`}
+                  title="Delete message"
+                >
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
+                    <line x1="2" y1="2" x2="8" y2="8" />
+                    <line x1="8" y1="2" x2="2" y2="8" />
+                  </svg>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

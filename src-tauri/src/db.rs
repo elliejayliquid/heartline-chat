@@ -72,7 +72,8 @@ pub struct Memory {
 pub struct JournalEntry {
     pub id: i64,
     pub companion_id: String,
-    pub entry_type: String,  // observation, hypothesis, self_state, open_question, intention
+    pub entry_type: String,  // event, user_preference, topic, tone, open_thread, follow_up_candidate
+    pub mode: String,        // shared_mindspace, practical, reflective, flirtatious, narrative, support
     pub content: String,
     pub why_it_mattered: String,
     pub emotional_tone: Option<String>,
@@ -331,6 +332,40 @@ impl Database {
                 .map_err(|e| format!("Migration: add conversation_id to memories failed: {}", e))?;
         }
 
+        // Migration: add embedding to companion_journal if needed
+        let has_journal_embedding: bool = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(companion_journal)")
+                .map_err(|e| format!("PRAGMA error: {}", e))?;
+            let cols: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| format!("PRAGMA query error: {}", e))?
+                .filter_map(|r| r.ok())
+                .collect();
+            cols.contains(&"embedding".to_string())
+        };
+        if !has_journal_embedding {
+            conn.execute_batch("ALTER TABLE companion_journal ADD COLUMN embedding BLOB;")
+                .map_err(|e| format!("Migration: add embedding to companion_journal failed: {}", e))?;
+        }
+
+        // Migration: add mode column to companion_journal if needed
+        let has_journal_mode: bool = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(companion_journal)")
+                .map_err(|e| format!("PRAGMA error: {}", e))?;
+            let cols: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| format!("PRAGMA query error: {}", e))?
+                .filter_map(|r| r.ok())
+                .collect();
+            cols.contains(&"mode".to_string())
+        };
+        if !has_journal_mode {
+            conn.execute_batch("ALTER TABLE companion_journal ADD COLUMN mode TEXT NOT NULL DEFAULT 'practical';")
+                .map_err(|e| format!("Migration: add mode to companion_journal failed: {}", e))?;
+        }
+
         Ok(())
     }
 
@@ -586,6 +621,46 @@ impl Database {
         .map_err(|e| format!("Insert error: {}", e))?;
 
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Delete a single message by ID.
+    pub fn delete_message(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM messages WHERE id = ?1", params![id])
+            .map_err(|e| format!("Delete message error: {}", e))?;
+        Ok(())
+    }
+
+    /// Delete all messages in a conversation that were created after the given message ID.
+    /// Used when editing a user message to fork the conversation.
+    pub fn delete_messages_after(&self, conversation_id: &str, after_message_id: i64) -> Result<u64, String> {
+        let conn = self.conn.lock().unwrap();
+        // Get the timestamp of the reference message
+        let ts: String = conn
+            .query_row(
+                "SELECT timestamp FROM messages WHERE id = ?1",
+                params![after_message_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+        let count = conn
+            .execute(
+                "DELETE FROM messages WHERE conversation_id = ?1 AND timestamp > ?2",
+                params![conversation_id, ts],
+            )
+            .map_err(|e| format!("Delete messages error: {}", e))?;
+        Ok(count as u64)
+    }
+
+    /// Update the content of an existing message (for edit functionality).
+    pub fn update_message_content(&self, id: i64, content: &str) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE messages SET content = ?1 WHERE id = ?2",
+            params![content, id],
+        )
+        .map_err(|e| format!("Update message error: {}", e))?;
+        Ok(())
     }
 
     // --- Rolling summary operations ---
@@ -1158,6 +1233,7 @@ impl Database {
         &self,
         companion_id: &str,
         entry_type: &str,
+        mode: &str,
         content: &str,
         why_it_mattered: &str,
         emotional_tone: Option<&str>,
@@ -1165,17 +1241,74 @@ impl Database {
         stability: &str,
         tags: &str,
         source_excerpt: Option<&str>,
+        embedding: Option<&[f32]>,
     ) -> Result<i64, String> {
+        let embedding_blob: Option<Vec<u8>> = embedding.map(|e| {
+            e.iter().flat_map(|f| f.to_le_bytes()).collect()
+        });
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO companion_journal
-             (companion_id, entry_type, content, why_it_mattered, emotional_tone, confidence, stability, tags, source_excerpt)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![companion_id, entry_type, content, why_it_mattered,
-                    emotional_tone, confidence, stability, tags, source_excerpt],
+             (companion_id, entry_type, mode, content, why_it_mattered, emotional_tone, confidence, stability, tags, source_excerpt, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![companion_id, entry_type, mode, content, why_it_mattered,
+                    emotional_tone, confidence, stability, tags, source_excerpt, embedding_blob],
         )
         .map_err(|e| format!("Insert journal entry error: {}", e))?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Find the closest existing journal entry of the same type within the last 60 days.
+    /// Returns the entry id if similarity exceeds threshold. Used for deduplication before saving.
+    pub fn find_similar_journal_entry(
+        &self,
+        companion_id: &str,
+        entry_type: &str,
+        query_embedding: &[f32],
+        threshold: f32,
+    ) -> Result<Option<i64>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, embedding FROM companion_journal
+                 WHERE companion_id = ?1 AND entry_type = ?2
+                   AND embedding IS NOT NULL
+                   AND created_at > datetime('now', '-60 days')",
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        let query_norm: f32 = query_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if query_norm == 0.0 {
+            return Ok(None);
+        }
+
+        let rows: Vec<(i64, Vec<f32>)> = stmt
+            .query_map(params![companion_id, entry_type], |row| {
+                let blob: Vec<u8> = row.get(1)?;
+                let emb: Vec<f32> = blob
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                Ok((row.get::<_, i64>(0)?, emb))
+            })
+            .map_err(|e| format!("Query error: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut best: Option<(f32, i64)> = None;
+        for (id, emb) in rows {
+            let emb_norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if emb_norm == 0.0 { continue; }
+            let dot: f32 = query_embedding.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
+            let sim = dot / (query_norm * emb_norm);
+            if sim >= threshold {
+                if best.as_ref().map_or(true, |(s, _)| sim > *s) {
+                    best = Some((sim, id));
+                }
+            }
+        }
+
+        Ok(best.map(|(_, id)| id))
     }
 
     fn map_journal_entry(row: &rusqlite::Row) -> rusqlite::Result<JournalEntry> {
@@ -1183,20 +1316,21 @@ impl Database {
             id: row.get(0)?,
             companion_id: row.get(1)?,
             entry_type: row.get(2)?,
-            content: row.get(3)?,
-            why_it_mattered: row.get(4)?,
-            emotional_tone: row.get(5)?,
-            confidence: row.get(6)?,
-            stability: row.get(7)?,
-            tags: row.get(8)?,
-            source_excerpt: row.get(9)?,
-            resolved_at: row.get(10)?,
-            created_at: row.get(11)?,
+            mode: row.get(3)?,
+            content: row.get(4)?,
+            why_it_mattered: row.get(5)?,
+            emotional_tone: row.get(6)?,
+            confidence: row.get(7)?,
+            stability: row.get(8)?,
+            tags: row.get(9)?,
+            source_excerpt: row.get(10)?,
+            resolved_at: row.get(11)?,
+            created_at: row.get(12)?,
         })
     }
 
     const JOURNAL_SELECT: &'static str =
-        "SELECT id, companion_id, entry_type, content, why_it_mattered, emotional_tone,
+        "SELECT id, companion_id, entry_type, mode, content, why_it_mattered, emotional_tone,
                 confidence, stability, tags, source_excerpt, resolved_at, created_at
          FROM companion_journal";
 
@@ -1217,19 +1351,23 @@ impl Database {
     }
 
     /// Get active journal entries for context injection into the talking model:
-    /// - Unresolved open_questions and intentions
-    /// - Recent self_state (last 7 days)
-    /// - Recent observations (last 3 days)
+    /// - Unresolved open_threads and follow_up_candidates (max 3)
+    /// - Recent events and user_preferences (last 3 days, max 2)
+    /// - Recent tone entries (last 1 day, max 1)
+    /// - Recent topics (last 2 days, max 1)
+    /// Total cap: 6 entries, newest first
+    /// Also supports legacy entry types for backwards compatibility.
     pub fn get_active_journal_entries(&self, companion_id: &str) -> Result<Vec<JournalEntry>, String> {
         let conn = self.conn.lock().unwrap();
         let sql = format!(
             "{} WHERE companion_id = ?1
                AND (
-                 (entry_type IN ('open_question', 'intention') AND resolved_at IS NULL)
-                 OR (entry_type = 'self_state' AND created_at > datetime('now', '-7 days'))
-                 OR (entry_type = 'observation' AND created_at > datetime('now', '-3 days'))
+                 (entry_type IN ('open_thread', 'follow_up_candidate', 'open_question', 'intention') AND resolved_at IS NULL)
+                 OR (entry_type IN ('event', 'user_preference', 'observation', 'self_state') AND created_at > datetime('now', '-3 days'))
+                 OR (entry_type IN ('tone', 'hypothesis') AND created_at > datetime('now', '-1 days'))
+                 OR (entry_type = 'topic' AND created_at > datetime('now', '-2 days'))
                )
-             ORDER BY created_at DESC LIMIT 10",
+             ORDER BY created_at DESC LIMIT 6",
             Self::JOURNAL_SELECT
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| format!("Query error: {}", e))?;
