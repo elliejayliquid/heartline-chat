@@ -236,30 +236,43 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   console.log(
                     `[Memory] Triggering extraction for conversation=${convId}, companion=${compId}`
                   );
-                  api
-                    .extractMemories(convId, compId)
-                    .then((count) => {
-                      if (count > 0) {
-                        console.log(`[Memory] ✓ Extracted ${count} memories.`);
-                      } else {
-                        console.log("[Memory] Nothing notable (0 memories).");
-                      }
-                    })
-                    .catch((err) => {
-                      console.error("[Memory] ✗ Extraction failed:", err);
-                    });
-                  api
-                    .extractJournal(convId, compId)
-                    .then((count) => {
-                      if (count > 0) {
-                        console.log(`[Journal] ✓ Saved ${count} journal entries.`);
-                      } else {
-                        console.log("[Journal] Nothing notable (0 entries).");
-                      }
-                    })
-                    .catch((err) => {
-                      console.error("[Journal] ✗ Extraction failed:", err);
-                    });
+
+                  // Emit toast events directly from frontend
+                  (async () => {
+                    // Memory extraction
+                    const memoryCount = await api.extractMemories(convId, compId);
+                    if (memoryCount > 0) {
+                      console.log(`[Memory] ✓ Extracted ${memoryCount} memories.`);
+                      // Emit event for toast
+                      const toastEvent: { type: "memory"; companion_id: string; count: number } = {
+                        type: "memory",
+                        companion_id: compId,
+                        count: memoryCount,
+                      };
+                      console.log("[Toast] Emitting memory toast event:", toastEvent);
+                      // Dispatch custom event to trigger toast
+                      window.dispatchEvent(new CustomEvent("memory-saved", { detail: toastEvent }));
+                    } else {
+                      console.log("[Memory] Nothing notable (0 memories).");
+                    }
+
+                    // Journal extraction
+                    const journalCount = await api.extractJournal(convId, compId);
+                    if (journalCount > 0) {
+                      console.log(`[Journal] ✓ Saved ${journalCount} journal entries.`);
+                      // Emit event for toast
+                      const toastEvent: { type: "journal"; companion_id: string; count: number } = {
+                        type: "journal",
+                        companion_id: compId,
+                        count: journalCount,
+                      };
+                      console.log("[Toast] Emitting journal toast event:", toastEvent);
+                      // Dispatch custom event to trigger toast
+                      window.dispatchEvent(new CustomEvent("journal-saved", { detail: toastEvent }));
+                    } else {
+                      console.log("[Journal] Nothing notable (0 entries).");
+                    }
+                  })();
                 }, 4000); // 4s debounce — waits for burst typing to settle
               }
             }

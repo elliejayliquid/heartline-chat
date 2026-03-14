@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { TitleBar } from "./components/layout/TitleBar";
 import { PanelLayout } from "./components/layout/PanelLayout";
 import { ModelPullToast } from "./components/layout/ModelPullToast";
+import { MemorySaveToast } from "./components/layout/MemorySaveToast";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { CompanionEditor } from "./components/companions/CompanionEditor";
 import { useChatStore } from "./stores/chatStore";
@@ -47,6 +48,7 @@ export default function App() {
 
       {/* Toast notifications */}
       <ModelPullToast />
+      <MemorySaveToast />
     </div>
   );
 }

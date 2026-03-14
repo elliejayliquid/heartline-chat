@@ -178,6 +178,8 @@ export const api = {
 
 // --- Event listeners ---
 
+export type { UnlistenFn };
+
 export function onStreamChunk(
   callback: (chunk: StreamChunk) => void
 ): Promise<UnlistenFn> {
