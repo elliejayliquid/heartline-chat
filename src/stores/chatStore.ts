@@ -272,6 +272,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     } else {
                       console.log("[Journal] Nothing notable (0 entries).");
                     }
+
+                    // Identity synthesis — checks internally if enough journal entries have accumulated
+                    try {
+                      const didSynthesize = await api.synthesizeIdentity(compId);
+                      if (didSynthesize) {
+                        console.log("[Identity] ✓ Identity summary updated.");
+                      }
+                    } catch (e) {
+                      console.warn("[Identity] Synthesis failed (non-fatal):", e);
+                    }
                   })();
                 }, 4000); // 4s debounce — waits for burst typing to settle
               }

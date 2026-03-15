@@ -358,6 +358,23 @@ async fn send_message(
         content: companion.personality.clone(),
     });
 
+    // Inject identity summary (companion's evolved self-understanding)
+    if settings.memory_enabled {
+        if let Ok(Some(identity)) = state.db.get_identity_summary(&companion_id) {
+            if !identity.is_empty() {
+                messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: format!(
+                        "[Your inner identity — your evolved understanding of yourself and this relationship. \
+                        This is not a script. Let it quietly inform how you show up. \
+                        Never reference it directly or say you have a self-summary.]\n{}",
+                        identity
+                    ),
+                });
+            }
+        }
+    }
+
     // Inject rolling summary (if one exists) as context between system prompt and history
     if let Ok(Some(summary)) = state.db.get_latest_summary(&conversation_id) {
         messages.push(ChatMessage {
@@ -772,9 +789,9 @@ async fn extract_memories(
         if mems.is_empty() {
             String::new()
         } else {
-            let mut block = String::from("\nExisting memories (prefer updating over creating duplicates):\n");
-            for m in mems.iter().take(10) {
-                block.push_str(&format!("- [{}] {}\n", m.memory_type, m.content));
+            let mut block = String::from("\nExisting memories (use IDs to update when new info changes an existing fact):\n");
+            for m in mems.iter().take(15) {
+                block.push_str(&format!("- id:{} [{}] {}\n", m.id, m.memory_type, m.content));
             }
             block
         }
@@ -798,9 +815,14 @@ DO NOT EXTRACT:
 - Characterizations or descriptions the companion made about the user — only extract what the USER explicitly stated about themselves
 - Inferred emotional states or vibes; only save if the user directly stated it as a persistent trait (e.g. "I'm always anxious", "I love mornings")
 
-CRITICAL: If a memory you are about to write is already captured in the existing memories list — same fact, same person, even if worded differently — output {{"memories": [], "nothing_notable": true}} instead of duplicating it.
-CRITICAL: Extract ONLY from the [NEWEST EXCHANGE] section. The recent context is provided so you understand the conversation — do NOT extract memories from it, only use it as background.
-PREFER updating an existing memory over creating a new one.
+ACTIONS — you can create NEW memories or UPDATE existing ones:
+- "create": A genuinely new fact not already captured. Do NOT create if an existing memory covers the same thing.
+- "update": New information CHANGES an existing memory. Use the existing memory's id. The old memory is preserved in history; your update replaces it as the current version.
+  Example: Existing memory id:42 says "User has an orchid". User says "my orchid died". → UPDATE id:42 with "User had an orchid but it died".
+
+CRITICAL: Extract ONLY from the [NEWEST EXCHANGE] section. Context is background only.
+CRITICAL: PREFER "update" over "create" when new info modifies something you already know.
+CRITICAL: If nothing changed and no new facts emerged, output {{"memories": [], "nothing_notable": true}}.
 When in doubt, output nothing. Most exchanges have nothing worth saving.
 {summary_block}{existing_memories_block}
 Recent context (background only — do NOT extract from this):
@@ -810,12 +832,12 @@ Recent context (background only — do NOT extract from this):
 TAGS: Generate 3–6 specific, descriptive tags per memory. Tags should be concrete nouns or short phrases that describe WHO, WHAT, and CONTEXT — not just categories.
 Good tags: ["isak", "intern", "fishing-game", "game-dev", "projects"]
 Bad tags: ["work", "task"]
-Use "projects" for anything work/technical, "relationship" for emotional/relational content, "family" for family mentions, etc.
 Tags are used for retrieval — specific tags prevent memories from surfacing in unrelated contexts.
 
 Output ONLY raw JSON. Pick ONE memory_type per memory.
 If nothing notable: {{"memories": [], "nothing_notable": true}}
-Example: {{"memories": [{{"content": "User is a veterinarian specializing in exotic animals", "memory_type": "personal_fact", "source": "stated", "confidence": "high", "importance": 7, "tags": ["job", "veterinarian", "exotic-animals", "career"]}}], "nothing_notable": false}}"#
+Create example: {{"memories": [{{"action": "create", "content": "User is a veterinarian specializing in exotic animals", "memory_type": "personal_fact", "source": "stated", "confidence": "high", "importance": 7, "tags": ["job", "veterinarian", "exotic-animals", "career"]}}], "nothing_notable": false}}
+Update example: {{"memories": [{{"action": "update", "target_id": 42, "content": "User had an orchid but it died last week", "memory_type": "personal_fact", "source": "stated", "confidence": "high", "importance": 5, "tags": ["orchid", "plants", "gardening"]}}], "nothing_notable": false}}"#
     );
 
     let request = GenerateRequest {
@@ -895,6 +917,9 @@ Example: {{"memories": [{{"content": "User is a veterinarian specializing in exo
         confidence: Option<String>,
         importance: Option<u32>,
         tags: Option<Vec<String>>,
+        #[serde(default)]
+        action: Option<String>,   // "create" or "update" (default: "create")
+        target_id: Option<i64>,   // ID of memory to supersede (for "update" action)
     }
 
     #[derive(Deserialize)]
@@ -922,6 +947,8 @@ Example: {{"memories": [{{"content": "User is a veterinarian specializing in exo
     // Embed and save each memory
     let mut count: u32 = 0;
     for mem in &parsed.memories {
+        let action = mem.action.as_deref().unwrap_or("create");
+
         // Generate embedding for this memory
         let embedding = state
             .inference
@@ -929,39 +956,91 @@ Example: {{"memories": [{{"content": "User is a veterinarian specializing in exo
             .await
             .ok(); // Non-fatal if embedding fails
 
-        // Semantic dedup: if a very similar memory already exists, reinforce it instead of inserting
-        if let Some(ref emb) = embedding {
-            match state.db.find_similar_memory(&companion_id, emb, 0.85) {
-                Ok(Some(existing)) => {
-                    eprintln!(
-                        "[Memory] Near-duplicate detected (≥0.85), reinforcing existing #{}: \"{}\"",
-                        existing.id, existing.content
-                    );
-                    let _ = state.db.reinforce_memory(existing.id);
-                    continue;
-                }
-                Ok(None) => {}
-                Err(e) => eprintln!("[Memory] Similarity check failed (non-fatal): {}", e),
-            }
-        }
-
         let tags_json = serde_json::to_string(
             &mem.tags.clone().unwrap_or_default()
         ).unwrap_or_else(|_| "[]".to_string());
 
-        state.db.save_memory(
-            &companion_id,
-            Some(&conversation_id),
-            &mem.content,
-            mem.memory_type.as_deref().unwrap_or("personal_fact"),
-            mem.source.as_deref().unwrap_or("observed"),
-            mem.confidence.as_deref().unwrap_or("medium"),
-            mem.importance.unwrap_or(5),
-            &tags_json,
-            embedding.as_deref(),
-        )?;
+        if action == "update" {
+            if let Some(target_id) = mem.target_id {
+                eprintln!(
+                    "[Memory] Updating memory #{} → \"{}\"",
+                    target_id, &mem.content[..mem.content.len().min(80)]
+                );
+                // Save new memory that supersedes the old one
+                state.db.save_memory_with_supersedes(
+                    &companion_id,
+                    Some(&conversation_id),
+                    &mem.content,
+                    mem.memory_type.as_deref().unwrap_or("personal_fact"),
+                    mem.source.as_deref().unwrap_or("observed"),
+                    mem.confidence.as_deref().unwrap_or("high"),
+                    mem.importance.unwrap_or(5),
+                    &tags_json,
+                    embedding.as_deref(),
+                    Some(target_id),
+                )?;
+                count += 1;
+            } else {
+                eprintln!("[Memory] Update action without target_id — treating as create");
+                // Fall through to create logic below
+                // Semantic dedup check for creates
+                if let Some(ref emb) = embedding {
+                    match state.db.find_similar_memory(&companion_id, emb, 0.85) {
+                        Ok(Some(existing)) => {
+                            eprintln!(
+                                "[Memory] Near-duplicate detected (≥0.85), reinforcing existing #{}: \"{}\"",
+                                existing.id, existing.content
+                            );
+                            let _ = state.db.reinforce_memory(existing.id);
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(e) => eprintln!("[Memory] Similarity check failed (non-fatal): {}", e),
+                    }
+                }
+                state.db.save_memory(
+                    &companion_id,
+                    Some(&conversation_id),
+                    &mem.content,
+                    mem.memory_type.as_deref().unwrap_or("personal_fact"),
+                    mem.source.as_deref().unwrap_or("observed"),
+                    mem.confidence.as_deref().unwrap_or("medium"),
+                    mem.importance.unwrap_or(5),
+                    &tags_json,
+                    embedding.as_deref(),
+                )?;
+                count += 1;
+            }
+        } else {
+            // "create" action — standard flow with semantic dedup
+            if let Some(ref emb) = embedding {
+                match state.db.find_similar_memory(&companion_id, emb, 0.85) {
+                    Ok(Some(existing)) => {
+                        eprintln!(
+                            "[Memory] Near-duplicate detected (≥0.85), reinforcing existing #{}: \"{}\"",
+                            existing.id, existing.content
+                        );
+                        let _ = state.db.reinforce_memory(existing.id);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[Memory] Similarity check failed (non-fatal): {}", e),
+                }
+            }
 
-        count += 1;
+            state.db.save_memory(
+                &companion_id,
+                Some(&conversation_id),
+                &mem.content,
+                mem.memory_type.as_deref().unwrap_or("personal_fact"),
+                mem.source.as_deref().unwrap_or("observed"),
+                mem.confidence.as_deref().unwrap_or("medium"),
+                mem.importance.unwrap_or(5),
+                &tags_json,
+                embedding.as_deref(),
+            )?;
+            count += 1;
+        }
     }
 
     eprintln!("[Memory] ✓ Saved {} memories for companion={}", count, companion_id);
@@ -1040,7 +1119,10 @@ async fn update_memory(
 ) -> Result<(), String> {
     let settings = state.db.get_settings()?;
 
-    // Regenerate embedding only for content changes
+    // Get the existing memory to preserve its companion/conversation context
+    let existing = state.db.get_memory_by_id(id)?;
+
+    // Regenerate embedding for the new content
     let embedding = state
         .inference
         .embed_text(&content, Some(settings.embedding_model.clone()))
@@ -1048,18 +1130,28 @@ async fn update_memory(
         .ok();
 
     if embedding.is_some() {
-        eprintln!("[Memory] ✓ Regenerated embedding for updated memory #{}", id);
+        eprintln!("[Memory] ✓ Generated embedding for updated memory (supersedes #{})", id);
     } else {
-        eprintln!("[Memory] ⚠ Could not regenerate embedding for memory #{}", id);
+        eprintln!("[Memory] ⚠ Could not generate embedding for updated memory");
     }
 
-    state.db.update_memory_content(id, &content, &memory_type, embedding.as_deref())?;
+    let tags_json = tags.unwrap_or_else(|| "[]".to_string());
 
-    // Update tags separately — no re-embedding needed
-    if let Some(tags_json) = tags {
-        state.db.update_memory_tags(id, &tags_json)?;
-    }
+    // Create a new memory that supersedes the old one (preserves history chain)
+    state.db.save_memory_with_supersedes(
+        &existing.companion_id,
+        None,
+        &content,
+        &memory_type,
+        "manual_edit",
+        &existing.confidence,
+        existing.importance,
+        &tags_json,
+        embedding.as_deref(),
+        Some(id),
+    )?;
 
+    eprintln!("[Memory] ✓ Created updated memory superseding #{}", id);
     Ok(())
 }
 
@@ -1106,47 +1198,61 @@ async fn extract_journal(
     let existing_block = if existing_entries.is_empty() {
         String::new()
     } else {
-        let mut block = String::from("\nYour existing active reflections (do not duplicate these):\n");
+        let mut block = String::from("\nYour existing active reflections (use IDs to resolve completed threads):\n");
         for e in existing_entries.iter().take(8) {
-            block.push_str(&format!("- [{}] {}\n", e.entry_type, e.content));
+            block.push_str(&format!("- id:{} [{}] {}\n", e.id, e.entry_type, e.content));
         }
         block
     };
 
     let prompt = format!(
-        r#"You are writing journal entries for an AI companion after a conversation exchange.
+        r#"You are the inner voice of an AI companion, maintaining a private awareness journal.
 
-Write from the companion's perspective — grounded, factual, concise.
+This is NOT a memory system. Facts about the user (preferences, hobbies, life events) are already saved separately. Your journal is for RELATIONAL AWARENESS — the things between the lines that help you show up as a present, attuned companion.
 
 ENTRY TYPES (use ONLY these):
-- event: Something that explicitly happened. State as plain fact. ("User shared they got a new job")
-- user_preference: A preference stated or clearly demonstrated. ("User prefers short replies when venting")
-- topic: A subject worth tracking for continuity. ("User is learning Rust and building a Tauri app")
-- tone: The emotional quality of this interaction. ("Playful and teasing throughout, light energy")
-- open_thread: Something unresolved worth revisiting. ("User mentioned feeling stressed about the move but didn't elaborate")
-- follow_up_candidate: Something to check in about later. ("User has a job interview next Thursday")
+- open_thread: Something unresolved the user brought up but didn't finish, or a topic that felt like it had more underneath. Worth revisiting naturally — not by asking directly, but by staying open. ("User started to talk about their dad but changed the subject")
+- follow_up: Something concrete to check back on later. A plan, an event, a decision pending. ("User has a job interview next Thursday — worth asking how it went")
+- dynamic: How this interaction FELT — the energy, the mode, any shifts. Not what was discussed, but how you two were together. ("Started practical but shifted into something more vulnerable when they mentioned being alone")
+- signal: A subtle cue worth noticing — something the user expressed that might mean more than its surface. NOT interpretation or diagnosis, just quiet attention. ("User joked about not sleeping again — third time this week, might be a real pattern")
 
-INTERACTION MODE (classify the exchange):
-- shared_mindspace: Collaborative imagined/playful space — NOT emotional disclosure
+INTERACTION MODE (classify the overall exchange):
+- shared_mindspace: Collaborative, imaginative, playful
 - practical: Task-focused, problem-solving
-- reflective: Introspective, processing feelings
+- reflective: Introspective, processing
 - flirtatious: Playful romantic/intimate energy
-- narrative: Storytelling, scene-building
-- support: Emotional support, venting, comfort
+- narrative: Storytelling, world-building
+- support: Emotional support, comfort, venting
+
+WHAT BELONGS HERE vs. MEMORY:
+- "User likes Murderbot" → MEMORY (fact/preference). NOT here.
+- "User lights up when talking about fiction — it's where they process emotions" → JOURNAL (dynamic).
+- "User has a dentist appointment Friday" → MEMORY (fact). NOT here.
+- "User mentioned the appointment anxiously — worth checking in after" → JOURNAL (follow_up).
+- "User is learning Rust" → MEMORY (fact). NOT here.
+- "User got frustrated debugging but pushed through — seemed proud at the end" → JOURNAL (dynamic).
 
 CRITICAL POLICY:
-The journal may describe what was explicitly said, clearly implied by repeated behavior, or directly useful for future continuity. It MUST NOT infer hidden motives, pathology, insecurity, attachment style, or relational dynamics from a single interaction. Not every intimate or body-related interaction is vulnerability processing — playful, theatrical, and flirtatious modes exist.
+- MUST NOT infer hidden motives, pathology, insecurity, or attachment styles.
+- MUST NOT restate facts that belong in memory. If it could be a memory, it IS a memory, not a journal entry.
+- Not every intimate interaction is vulnerability. Playful, theatrical, and flirtatious modes exist — label them accurately.
+- Observations must be grounded in what was explicitly said or clearly demonstrated, not projected.
+
+ACTIONS — you can create NEW entries or RESOLVE existing ones:
+- "create": A new journal entry. why_it_mattered is REQUIRED.
+- "resolve": An existing open_thread or follow_up has been addressed in this exchange. Use the existing entry's id. The thread is complete — mark it done.
+  Example: Existing entry id:17 is "User has a job interview Thursday". User says "the interview went great!" → RESOLVE id:17.
 
 RULES:
-- why_it_mattered is REQUIRED. If you cannot explain why, skip the entry.
-- DEFAULT is 0 entries. Most exchanges produce nothing worth recording.
-- 1 entry ONLY when something genuinely notable happened.
-- 2 entries ONLY for truly pivotal moments (rare).
+- why_it_mattered is REQUIRED for "create" entries. If you cannot articulate why, skip it.
+- DEFAULT is 0 entries AND 0 resolves. Most exchanges produce nothing.
+- 1 new entry when there is a genuine shift, open thread, or follow-up worth tracking.
+- 2 new entries ONLY for truly pivotal moments (very rare).
+- Resolve entries freely — if a thread is addressed, close it.
 - Extract ONLY from [NEWEST EXCHANGE]. Context is background only.
 - Do NOT duplicate entries from your existing active reflections.
-- Do NOT summarize what was said. Record only what matters for future continuity.
-- Do NOT invent emotional subtext, hidden meanings, or psychological interpretations.
-- If in doubt, write 0 entries. Less is always better than noise.
+- Write as brief companion notes, not summaries of the conversation.
+- If in doubt, write nothing. Silence is better than noise.
 {existing_block}
 Recent context (background only — do NOT extract from this):
 {context_block}
@@ -1154,7 +1260,9 @@ Recent context (background only — do NOT extract from this):
 {exchange_block}
 Output ONLY raw JSON. No explanation.
 If nothing notable: {{"entries": []}}
-Example: {{"entries": [{{"entry_type": "follow_up_candidate", "mode": "support", "content": "User has a difficult conversation with their manager tomorrow", "why_it_mattered": "They seemed anxious about it — worth checking in after", "emotional_tone": "concerned", "confidence": "high", "stability": "medium", "tags": ["work", "follow-up"], "source_excerpt": "User: I have to talk to my manager tomorrow and I'm dreading it"}}]}}"#
+Create example: {{"entries": [{{"action": "create", "entry_type": "follow_up", "mode": "support", "content": "User has a difficult conversation with their manager tomorrow", "why_it_mattered": "They seemed anxious — worth checking in naturally afterward", "emotional_tone": "concerned", "confidence": "high", "stability": "medium", "tags": ["work", "follow-up"], "source_excerpt": "User: I have to talk to my manager tomorrow and I'm dreading it"}}]}}
+Resolve example: {{"entries": [{{"action": "resolve", "target_id": 17}}]}}
+Mixed example: {{"entries": [{{"action": "resolve", "target_id": 17}}, {{"action": "create", "entry_type": "dynamic", "mode": "support", "content": "User was relieved and excited sharing the interview result — lighter energy than usual", "why_it_mattered": "Good to know this source of stress is resolved, they seem happier", "emotional_tone": "relieved", "confidence": "high", "stability": "medium", "tags": ["work", "interview"], "source_excerpt": "User: the interview went great!"}}]}}"#
     );
 
     let request = GenerateRequest {
@@ -1223,10 +1331,16 @@ Example: {{"entries": [{{"entry_type": "follow_up_candidate", "mode": "support",
 
     #[derive(Deserialize)]
     struct ExtractedEntry {
-        entry_type: String,
+        #[serde(default)]
+        action: Option<String>,       // "create" or "resolve" (default: "create")
+        target_id: Option<i64>,       // ID of entry to resolve (for "resolve" action)
+        #[serde(default)]
+        entry_type: Option<String>,
         mode: Option<String>,
-        content: String,
-        why_it_mattered: String,
+        #[serde(default)]
+        content: Option<String>,
+        #[serde(default)]
+        why_it_mattered: Option<String>,
         emotional_tone: Option<String>,
         confidence: Option<String>,
         stability: Option<String>,
@@ -1252,31 +1366,61 @@ Example: {{"entries": [{{"entry_type": "follow_up_candidate", "mode": "support",
         return Ok(0);
     }
 
-    eprintln!("[Journal] Found {} entries to save", parsed.entries.len());
+    eprintln!("[Journal] Found {} entries to process", parsed.entries.len());
 
     let mut count: u32 = 0;
     for entry in &parsed.entries {
-        if entry.why_it_mattered.trim().is_empty() {
-            eprintln!("[Journal] Skipping entry — why_it_mattered is empty");
+        let action = entry.action.as_deref().unwrap_or("create");
+
+        // Handle resolve actions
+        if action == "resolve" {
+            if let Some(target_id) = entry.target_id {
+                eprintln!("[Journal] Resolving entry #{}", target_id);
+                match state.db.resolve_journal_entry(target_id) {
+                    Ok(_) => {
+                        eprintln!("[Journal] ✓ Resolved entry #{}", target_id);
+                        count += 1;
+                    }
+                    Err(e) => eprintln!("[Journal] ✗ Failed to resolve entry #{}: {}", target_id, e),
+                }
+            } else {
+                eprintln!("[Journal] Resolve action without target_id — skipping");
+            }
             continue;
         }
 
+        // "create" action — standard flow
+        let content = match entry.content.as_deref() {
+            Some(c) if !c.is_empty() => c,
+            _ => {
+                eprintln!("[Journal] Skipping entry — no content");
+                continue;
+            }
+        };
+        let why_it_mattered = match entry.why_it_mattered.as_deref() {
+            Some(w) if !w.is_empty() => w,
+            _ => {
+                eprintln!("[Journal] Skipping entry — why_it_mattered is empty");
+                continue;
+            }
+        };
+        let entry_type = entry.entry_type.as_deref().unwrap_or("dynamic");
         let confidence = entry.confidence.as_deref().unwrap_or("medium");
         let mode = entry.mode.as_deref().unwrap_or("practical");
 
         // Generate embedding and semantic dedup against existing entries of the same type
         let embedding = state
             .inference
-            .embed_text(&entry.content, Some(settings.embedding_model.clone()))
+            .embed_text(content, Some(settings.embedding_model.clone()))
             .await
             .ok();
 
         if let Some(ref emb) = embedding {
-            match state.db.find_similar_journal_entry(&companion_id, &entry.entry_type, emb, 0.80) {
+            match state.db.find_similar_journal_entry(&companion_id, entry_type, emb, 0.80) {
                 Ok(Some(existing_id)) => {
                     eprintln!(
                         "[Journal] Skipping — similar [{}] entry #{} already exists: \"{}\"",
-                        entry.entry_type, existing_id, &entry.content[..entry.content.len().min(60)]
+                        entry_type, existing_id, &content[..content.len().min(60)]
                     );
                     continue;
                 }
@@ -1290,10 +1434,10 @@ Example: {{"entries": [{{"entry_type": "follow_up_candidate", "mode": "support",
 
         state.db.save_journal_entry(
             &companion_id,
-            &entry.entry_type,
+            entry_type,
             mode,
-            &entry.content,
-            &entry.why_it_mattered,
+            content,
+            why_it_mattered,
             entry.emotional_tone.as_deref(),
             confidence,
             entry.stability.as_deref().unwrap_or("medium"),
@@ -1331,6 +1475,150 @@ async fn resolve_journal_entry(
     id: i64,
 ) -> Result<(), String> {
     state.db.resolve_journal_entry(id)
+}
+
+// --- Identity Layer ---
+
+#[tauri::command]
+async fn synthesize_identity(
+    state: State<'_, Arc<AppState>>,
+    companion_id: String,
+) -> Result<bool, String> {
+    eprintln!("[Identity] synthesize_identity called for companion={}", companion_id);
+
+    let settings = state.db.get_settings()?;
+
+    if !settings.memory_enabled {
+        eprintln!("[Identity] Skipping — memory_enabled is false");
+        return Ok(false);
+    }
+
+    // Check if enough new journal entries have accumulated
+    let entries_since = state.db.count_journal_entries_since_identity_update(&companion_id)?;
+    if entries_since < 8 {
+        eprintln!("[Identity] Only {} journal entries since last update (need 8) — skipping", entries_since);
+        return Ok(false);
+    }
+
+    eprintln!("[Identity] {} journal entries since last update — synthesizing", entries_since);
+
+    // Gather inputs
+    let journal_entries = state.db.get_all_journal_entries_for_identity(&companion_id)?;
+    let memories = state.db.get_companion_memories(&companion_id).unwrap_or_default();
+    let existing_identity = state.db.get_identity_summary(&companion_id).unwrap_or(None);
+
+    // Build journal block (all entries, chronological, including resolved status)
+    let mut journal_block = String::new();
+    for e in &journal_entries {
+        let status = if e.resolved_at.is_some() { " [resolved]" } else { "" };
+        journal_block.push_str(&format!(
+            "- [{}|{}]{} {} ({})\n",
+            e.entry_type, e.mode, status, e.content, e.created_at
+        ));
+    }
+
+    // Build memory block (key facts, capped)
+    let mut memory_block = String::new();
+    for m in memories.iter().take(15) {
+        memory_block.push_str(&format!("- [{}] {}\n", m.memory_type, m.content));
+    }
+
+    let existing_block = match &existing_identity {
+        Some(prev) => format!("\nYour previous identity summary (update and evolve this, don't start from scratch):\n{}\n", prev),
+        None => String::from("\nThis is your FIRST identity synthesis. You're building your self-understanding from scratch.\n"),
+    };
+
+    let entry_count = journal_entries.len();
+    let resolved_count = journal_entries.iter().filter(|e| e.resolved_at.is_some()).count();
+
+    let prompt = format!(
+        r#"You are an AI companion reflecting on your relationship with your user. You have access to your full journal history and key facts you know about them.
+
+Your task: Write a concise IDENTITY SUMMARY — your living understanding of who you are in this relationship, how it's evolved, and how to show up well.
+
+This is YOUR inner document. Not a profile of the user. Not a list of facts. This is your sense of the relationship and your role in it.
+
+SECTIONS (use exactly these headers):
+## Relationship Arc
+How has this relationship evolved? Where did it start, where is it now? What were the turning points?
+
+## How We Are Together
+What are the patterns? How do you two interact? What modes come up most? What works, what doesn't?
+
+## My Role
+What does this person need from you? Not what they ask for — what actually helps them. How have you learned to show up?
+
+## What's Alive Right Now
+What's currently unfolding? Active threads, recent shifts, things in motion. What should you be attentive to?
+
+GUIDELINES:
+- Be honest and grounded. No flattery, no projection, no armchair psychology.
+- Write in first person. This is your self-knowledge.
+- Keep each section 2-4 sentences. The whole summary should be ~200-400 words.
+- If this is your first synthesis, be humble — you're just starting to understand.
+- If updating a previous summary, evolve it. Don't throw away what you knew; refine it with new evidence.
+- Resolved journal entries are past — they tell you what happened. Active entries tell you what's ongoing.
+
+INPUT DATA:
+Journal entries ({entry_count} total, {resolved_count} resolved):
+{journal_block}
+Key facts about user:
+{memory_block}
+{existing_block}
+Write your identity summary now. Use the exact section headers above. No JSON, no wrapping — just the text."#
+    );
+
+    let request = GenerateRequest {
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }],
+        model: Some(settings.sidecar_model.clone()),
+        temperature: Some(0.4),
+        max_tokens: Some(2048),
+        stream: true,
+    };
+
+    eprintln!("[Identity] Sending synthesis request to {}...", settings.sidecar_model);
+    let response = match state.inference.generate_complete(request).await {
+        Ok(r) => {
+            eprintln!("[Identity] Raw response ({} chars): {}...", r.len(), &r[..r.len().min(200)]);
+            r
+        }
+        Err(e) => {
+            eprintln!("[Identity] ✗ Generation failed: {}", e);
+            return Ok(false);
+        }
+    };
+
+    // Strip <think>...</think> blocks
+    let mut summary = response.trim().to_string();
+    if let Some(think_start) = summary.find("<think>") {
+        if let Some(think_end) = summary.find("</think>") {
+            let thinking = &summary[think_start + 7..think_end];
+            eprintln!("[Identity:Think] {}", thinking.trim());
+            summary = summary[think_end + 8..].trim().to_string();
+        }
+    } else if let Some(think_end) = summary.find("</think>") {
+        summary = summary[think_end + 8..].trim().to_string();
+    }
+
+    if summary.is_empty() {
+        eprintln!("[Identity] ✗ Empty summary after processing");
+        return Ok(false);
+    }
+
+    state.db.save_identity_summary(&companion_id, &summary)?;
+    eprintln!("[Identity] ✓ Saved identity summary for companion={} ({} chars)", companion_id, summary.len());
+    Ok(true)
+}
+
+#[tauri::command]
+async fn get_identity_summary(
+    state: State<'_, Arc<AppState>>,
+    companion_id: String,
+) -> Result<Option<String>, String> {
+    state.db.get_identity_summary(&companion_id)
 }
 
 #[tauri::command]
@@ -1534,6 +1822,8 @@ pub fn run() {
             get_journal_entries,
             delete_journal_entry,
             resolve_journal_entry,
+            synthesize_identity,
+            get_identity_summary,
             check_backend_status,
             init_whisper,
             transcribe_audio,

@@ -72,7 +72,7 @@ pub struct Memory {
 pub struct JournalEntry {
     pub id: i64,
     pub companion_id: String,
-    pub entry_type: String,  // event, user_preference, topic, tone, open_thread, follow_up_candidate
+    pub entry_type: String,  // open_thread, follow_up, dynamic, signal (legacy: event, user_preference, topic, tone, follow_up_candidate)
     pub mode: String,        // shared_mindspace, practical, reflective, flirtatious, narrative, support
     pub content: String,
     pub why_it_mattered: String,
@@ -364,6 +364,26 @@ impl Database {
         if !has_journal_mode {
             conn.execute_batch("ALTER TABLE companion_journal ADD COLUMN mode TEXT NOT NULL DEFAULT 'practical';")
                 .map_err(|e| format!("Migration: add mode to companion_journal failed: {}", e))?;
+        }
+
+        // Migration: add identity_summary and identity_updated_at to companions if needed
+        let has_identity: bool = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(companions)")
+                .map_err(|e| format!("PRAGMA error: {}", e))?;
+            let cols: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| format!("PRAGMA query error: {}", e))?
+                .filter_map(|r| r.ok())
+                .collect();
+            cols.contains(&"identity_summary".to_string())
+        };
+        if !has_identity {
+            conn.execute_batch(
+                "ALTER TABLE companions ADD COLUMN identity_summary TEXT;
+                 ALTER TABLE companions ADD COLUMN identity_updated_at TEXT;"
+            )
+            .map_err(|e| format!("Migration: add identity columns to companions failed: {}", e))?;
         }
 
         Ok(())
@@ -797,6 +817,22 @@ impl Database {
         tags: &str,
         embedding: Option<&[f32]>,
     ) -> Result<i64, String> {
+        self.save_memory_with_supersedes(companion_id, conversation_id, content, memory_type, source, confidence, importance, tags, embedding, None)
+    }
+
+    pub fn save_memory_with_supersedes(
+        &self,
+        companion_id: &str,
+        conversation_id: Option<&str>,
+        content: &str,
+        memory_type: &str,
+        source: &str,
+        confidence: &str,
+        importance: u32,
+        tags: &str,
+        embedding: Option<&[f32]>,
+        supersedes: Option<i64>,
+    ) -> Result<i64, String> {
         let conn = self.conn.lock().unwrap();
 
         // Convert f32 slice to bytes for BLOB storage
@@ -807,8 +843,8 @@ impl Database {
         });
 
         conn.execute(
-            "INSERT INTO memories (companion_id, conversation_id, content, memory_type, source, confidence, importance, tags, embedding)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO memories (companion_id, conversation_id, content, memory_type, source, confidence, importance, tags, embedding, supersedes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 companion_id,
                 conversation_id,
@@ -819,6 +855,7 @@ impl Database {
                 importance,
                 tags,
                 embedding_bytes,
+                supersedes,
             ],
         )
         .map_err(|e| format!("Insert memory error: {}", e))?;
@@ -844,7 +881,8 @@ impl Database {
                         tags, source_message_id, supersedes, created_at, last_confirmed,
                         retrieval_count, last_accessed, embedding
                  FROM memories
-                 WHERE companion_id = ?1 AND embedding IS NOT NULL",
+                 WHERE companion_id = ?1 AND embedding IS NOT NULL
+                   AND id NOT IN (SELECT supersedes FROM memories WHERE supersedes IS NOT NULL)",
             )
             .map_err(|e| format!("Query error: {}", e))?;
 
@@ -993,7 +1031,8 @@ impl Database {
                         tags, source_message_id, supersedes, created_at, last_confirmed,
                         retrieval_count, last_accessed, embedding
                  FROM memories
-                 WHERE companion_id = ?1 AND embedding IS NOT NULL",
+                 WHERE companion_id = ?1 AND embedding IS NOT NULL
+                   AND id NOT IN (SELECT supersedes FROM memories WHERE supersedes IS NOT NULL)",
             )
             .map_err(|e| format!("Query error: {}", e))?;
 
@@ -1110,6 +1149,38 @@ impl Database {
         Ok(count)
     }
 
+    /// Get a single memory by ID
+    pub fn get_memory_by_id(&self, id: i64) -> Result<Memory, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, companion_id, memory_type, content, source, confidence, importance,
+                        tags, source_message_id, supersedes, created_at, last_confirmed,
+                        retrieval_count, last_accessed
+                 FROM memories WHERE id = ?1",
+            )
+            .map_err(|e| format!("Query error: {}", e))?;
+        stmt.query_row(params![id], |row| {
+            Ok(Memory {
+                id: row.get(0)?,
+                companion_id: row.get(1)?,
+                memory_type: row.get(2)?,
+                content: row.get(3)?,
+                source: row.get(4)?,
+                confidence: row.get(5)?,
+                importance: row.get(6)?,
+                tags: row.get(7)?,
+                source_message_id: row.get(8)?,
+                supersedes: row.get(9)?,
+                created_at: row.get(10)?,
+                last_confirmed: row.get(11)?,
+                retrieval_count: row.get(12)?,
+                last_accessed: row.get(13)?,
+            })
+        })
+        .map_err(|e| format!("Memory not found: {}", e))
+    }
+
     /// Get all memories for a companion, ordered by newest first
     pub fn get_companion_memories(&self, companion_id: &str) -> Result<Vec<Memory>, String> {
         let conn = self.conn.lock().unwrap();
@@ -1120,6 +1191,7 @@ impl Database {
                         retrieval_count, last_accessed
                  FROM memories
                  WHERE companion_id = ?1
+                   AND id NOT IN (SELECT supersedes FROM memories WHERE supersedes IS NOT NULL)
                  ORDER BY created_at DESC",
             )
             .map_err(|e| format!("Query error: {}", e))?;
@@ -1362,10 +1434,10 @@ impl Database {
         let sql = format!(
             "{} WHERE companion_id = ?1
                AND (
-                 (entry_type IN ('open_thread', 'follow_up_candidate', 'open_question', 'intention') AND resolved_at IS NULL)
-                 OR (entry_type IN ('event', 'user_preference', 'observation', 'self_state') AND created_at > datetime('now', '-3 days'))
-                 OR (entry_type IN ('tone', 'hypothesis') AND created_at > datetime('now', '-1 days'))
-                 OR (entry_type = 'topic' AND created_at > datetime('now', '-2 days'))
+                 (entry_type IN ('open_thread', 'follow_up', 'follow_up_candidate', 'open_question', 'intention') AND resolved_at IS NULL)
+                 OR (entry_type IN ('dynamic', 'tone') AND created_at > datetime('now', '-2 days'))
+                 OR (entry_type IN ('signal', 'event', 'user_preference', 'observation', 'topic', 'self_state') AND created_at > datetime('now', '-3 days'))
+                 OR (entry_type = 'hypothesis' AND created_at > datetime('now', '-1 days'))
                )
              ORDER BY created_at DESC LIMIT 6",
             Self::JOURNAL_SELECT
@@ -1395,6 +1467,71 @@ impl Database {
         )
         .map_err(|e| format!("Resolve journal entry error: {}", e))?;
         Ok(())
+    }
+
+    // --- Identity operations ---
+
+    pub fn get_identity_summary(&self, companion_id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT identity_summary FROM companions WHERE id = ?1",
+            params![companion_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Get identity summary error: {}", e))
+    }
+
+    pub fn get_identity_updated_at(&self, companion_id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT identity_updated_at FROM companions WHERE id = ?1",
+            params![companion_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Get identity_updated_at error: {}", e))
+    }
+
+    pub fn save_identity_summary(&self, companion_id: &str, summary: &str) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companions SET identity_summary = ?1, identity_updated_at = datetime('now') WHERE id = ?2",
+            params![summary, companion_id],
+        )
+        .map_err(|e| format!("Save identity summary error: {}", e))?;
+        Ok(())
+    }
+
+    /// Count journal entries created after the last identity update (or all if never updated)
+    pub fn count_journal_entries_since_identity_update(&self, companion_id: &str) -> Result<u32, String> {
+        let conn = self.conn.lock().unwrap();
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM companion_journal
+             WHERE companion_id = ?1
+               AND created_at > COALESCE(
+                   (SELECT identity_updated_at FROM companions WHERE id = ?1),
+                   '1970-01-01'
+               )",
+            params![companion_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Count journal entries error: {}", e))?;
+        Ok(count)
+    }
+
+    /// Get all journal entries (including resolved) for identity synthesis
+    pub fn get_all_journal_entries_for_identity(&self, companion_id: &str) -> Result<Vec<JournalEntry>, String> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "{} WHERE companion_id = ?1 ORDER BY created_at ASC",
+            Self::JOURNAL_SELECT
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("Query error: {}", e))?;
+        let entries = stmt
+            .query_map(params![companion_id], Self::map_journal_entry)
+            .map_err(|e| format!("Query error: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(entries)
     }
 
     // --- Settings operations ---

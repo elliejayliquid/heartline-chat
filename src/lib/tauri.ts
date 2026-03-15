@@ -170,6 +170,12 @@ export const api = {
   resolveJournalEntry: (id: number) =>
     invoke<void>("resolve_journal_entry", { id }),
 
+  // Identity
+  synthesizeIdentity: (companionId: string) =>
+    invoke<boolean>("synthesize_identity", { companionId }),
+  getIdentitySummary: (companionId: string) =>
+    invoke<string | null>("get_identity_summary", { companionId }),
+
   // Whisper STT
   initWhisper: () => invoke<boolean>("init_whisper"),
   transcribeAudio: (audioData: number[]) =>

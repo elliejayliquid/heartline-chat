@@ -226,13 +226,17 @@ export function CompanionEditor() {
   };
 
   const journalTypeColors: Record<string, string> = {
+    // Current types
+    open_thread: "text-sky-400 bg-sky-500/15 border-sky-500/30",
+    follow_up: "text-emerald-400 bg-emerald-500/15 border-emerald-500/30",
+    dynamic: "text-amber-400 bg-amber-500/15 border-amber-500/30",
+    signal: "text-violet-400 bg-violet-500/15 border-violet-500/30",
+    // Legacy types (still rendered for old entries)
     event: "text-slate-300 bg-slate-500/15 border-slate-500/30",
     user_preference: "text-purple-400 bg-purple-500/15 border-purple-500/30",
     topic: "text-indigo-400 bg-indigo-500/15 border-indigo-500/30",
     tone: "text-amber-400 bg-amber-500/15 border-amber-500/30",
-    open_thread: "text-sky-400 bg-sky-500/15 border-sky-500/30",
     follow_up_candidate: "text-emerald-400 bg-emerald-500/15 border-emerald-500/30",
-    // Legacy types for backwards compat
     observation: "text-slate-300 bg-slate-500/15 border-slate-500/30",
     hypothesis: "text-amber-400 bg-amber-500/15 border-amber-500/30",
     self_state: "text-violet-400 bg-violet-500/15 border-violet-500/30",
@@ -241,13 +245,17 @@ export function CompanionEditor() {
   };
 
   const journalTypeLabels: Record<string, string> = {
+    // Current types
+    open_thread: "Open Thread",
+    follow_up: "Follow Up",
+    dynamic: "Dynamic",
+    signal: "Signal",
+    // Legacy types
     event: "Event",
     user_preference: "Preference",
     topic: "Topic",
     tone: "Tone",
-    open_thread: "Open Thread",
     follow_up_candidate: "Follow Up",
-    // Legacy
     observation: "Observation",
     hypothesis: "Hypothesis",
     self_state: "Self State",
@@ -623,7 +631,7 @@ export function CompanionEditor() {
                       >
                         {/* Actions */}
                         <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover/card:opacity-100 transition-all">
-                          {!entry.resolved_at && ["open_thread", "follow_up_candidate", "open_question", "intention"].includes(entry.entry_type) && (
+                          {!entry.resolved_at && ["open_thread", "follow_up", "follow_up_candidate", "open_question", "intention"].includes(entry.entry_type) && (
                             <button
                               onClick={() => handleResolveEntry(entry.id)}
                               disabled={resolvingId === entry.id}
